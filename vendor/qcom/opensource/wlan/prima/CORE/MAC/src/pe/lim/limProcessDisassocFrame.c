@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2016 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2017, 2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -49,6 +49,9 @@
 #include "limSerDesUtils.h"
 #include "limSendMessages.h"
 #include "schApi.h"
+#ifdef WLAN_FEATURE_LFR_MBB
+#include "lim_mbb.h"
+#endif
 
 
 /**
@@ -77,13 +80,16 @@ limProcessDisassocFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tpPESession
     tpSirMacMgmtHdr    pHdr;
     tpDphHashNode      pStaDs;
     tLimMlmDisassocInd mlmDisassocInd;
-#ifdef WLAN_FEATURE_11W
-    tANI_U32            frameLen;
-#endif
+    tANI_U32            frame_len;
 
     pHdr = WDA_GET_RX_MAC_HEADER(pRxPacketInfo);
     pBody = WDA_GET_RX_MPDU_DATA(pRxPacketInfo);
+    frame_len = WDA_GET_RX_PAYLOAD_LEN(pRxPacketInfo);
 
+    if (frame_len < 2) {
+        limLog(pMac, LOGE, FL("frame len less than 2"));
+        return;
+    }
 
     if (limIsGroupAddr(pHdr->sa))
     {
@@ -105,6 +111,16 @@ limProcessDisassocFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tpPESession
         return;
     }
 
+    if (LIM_IS_STA_ROLE(psessionEntry) &&
+       ((eLIM_SME_WT_DISASSOC_STATE == psessionEntry->limSmeState) ||
+        (eLIM_SME_WT_DEAUTH_STATE == psessionEntry->limSmeState))) {
+            PELOGE(limLog(pMac, LOG1,
+                   FL("recevied disaasoc frame in %d limsmestate... droping this"),
+                       psessionEntry->limSmeState);)
+            return;
+    }
+
+
 #ifdef WLAN_FEATURE_11W
     /* PMF: If this session is a PMF session, then ensure that this frame was protected */
     if(psessionEntry->limRmfEnabled  && (WDA_GET_RX_DPU_FEEDBACK(pRxPacketInfo) & DPU_FEEDBACK_UNPROTECTED_ERROR))
@@ -112,10 +128,9 @@ limProcessDisassocFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tpPESession
         PELOGE(limLog(pMac, LOG1, FL("received an unprotected disassoc from AP"));)
         // If the frame received is unprotected, forward it to the supplicant to initiate
         // an SA query
-        frameLen = WDA_GET_RX_PAYLOAD_LEN(pRxPacketInfo);
         //send the unprotected frame indication to SME
         limSendSmeUnprotectedMgmtFrameInd( pMac, pHdr->fc.subType,
-                                           (tANI_U8*)pHdr, (frameLen + sizeof(tSirMacMgmtHdr)),
+                                           (tANI_U8*)pHdr, (frame_len + sizeof(tSirMacMgmtHdr)),
                                            psessionEntry->smeSessionId, psessionEntry);
         return;
     }
@@ -123,21 +138,14 @@ limProcessDisassocFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tpPESession
 
     // Get reasonCode from Disassociation frame body
     reasonCode = sirReadU16(pBody);
-#ifdef CONFIG_HUAWEI_WIFI
-    limLog(pMac, LOGE,
-        FL("Received Disassoc frame for Addr: "HWMAC_ADDRESS_STR
-        "(mlm state=%s, sme state=%d),"
-        "with reason code %d from "MAC_ADDRESS_STR), HWMAC_ADDR_ARRAY(pHdr->da),
-        limMlmStateStr(psessionEntry->limMlmState), psessionEntry->limSmeState,
-        reasonCode, MAC_ADDR_ARRAY(pHdr->sa));
-#else
+
     limLog(pMac, LOGE,
         FL("Received Disassoc frame for Addr: "MAC_ADDRESS_STR
         "(mlm state=%s, sme state=%d),"
         "with reason code %d from "MAC_ADDRESS_STR), MAC_ADDR_ARRAY(pHdr->da),
         limMlmStateStr(psessionEntry->limMlmState), psessionEntry->limSmeState,
         reasonCode, MAC_ADDR_ARRAY(pHdr->sa));
-#endif
+
     /**
    * Extract 'associated' context for STA, if any.
    * This is maintained by DPH and created by LIM.
@@ -167,6 +175,13 @@ limProcessDisassocFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tpPESession
         return;
     }
 
+#ifdef WLAN_FEATURE_LFR_MBB
+    if (lim_is_mbb_reassoc_in_progress(pMac, psessionEntry)) {
+        limLog(pMac, LOGE, FL("Ignore Disassoc frame as LFR MBB in progress"));
+        return;
+    }
+#endif
+
     /** If we are in the Wait for ReAssoc Rsp state */
     if (limIsReassocInProgress(pMac,psessionEntry)) {
         /** If we had received the DisAssoc from,
@@ -190,6 +205,14 @@ limProcessDisassocFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tpPESession
             return;
         }
     }
+
+    if ((psessionEntry->limSystemRole == eLIM_STA_ROLE) &&
+         psessionEntry->limMlmState == eLIM_MLM_WT_ADD_STA_RSP_STATE) {
+        PELOGE(limLog(pMac, LOGE, FL("received Disassoc from the AP in"
+                      "add sta response state, disconnecting"));)
+        psessionEntry->fDeauthReceived = true;
+        return;
+      }
 
     if ( (psessionEntry->limSystemRole == eLIM_AP_ROLE) ||
          (psessionEntry->limSystemRole == eLIM_BT_AMP_AP_ROLE) )
@@ -277,7 +300,8 @@ limProcessDisassocFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tpPESession
     }
 
     if ((pStaDs->mlmStaContext.mlmState == eLIM_MLM_WT_DEL_STA_RSP_STATE) ||
-        (pStaDs->mlmStaContext.mlmState == eLIM_MLM_WT_DEL_BSS_RSP_STATE))
+        (pStaDs->mlmStaContext.mlmState == eLIM_MLM_WT_DEL_BSS_RSP_STATE) ||
+         pStaDs->sta_deletion_in_progress)
     {
         /**
          * Already in the process of deleting context for the peer
@@ -291,7 +315,7 @@ limProcessDisassocFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tpPESession
 
         return;
     } 
-
+    pStaDs->sta_deletion_in_progress = true;
     if (pStaDs->mlmStaContext.mlmState != eLIM_MLM_LINK_ESTABLISHED_STATE)
     {
         /**

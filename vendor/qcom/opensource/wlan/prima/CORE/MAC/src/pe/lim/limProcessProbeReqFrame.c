@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2015 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2018 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -173,8 +173,8 @@ void limRemovePBCSessions(tpAniSirGlobal pMac, tSirMacAddr pRemoveMac,tpPESessio
           prev->next = pbc->next;
           if (pbc == psessionEntry->pAPWPSPBCSession)
             psessionEntry->pAPWPSPBCSession = pbc->next;
-            vos_mem_free(pbc);
-            return;
+          vos_mem_free(pbc);
+          return;
         }
         prev = pbc;
         pbc = pbc->next;
@@ -669,7 +669,7 @@ limIndicateProbeReqToHDD(tpAniSirGlobal pMac, tANI_U8 *pBd,
 
     //send the probe req to SME.
     limSendSmeMgmtFrameInd( pMac, psessionEntry->smeSessionId, pBd,
-                            psessionEntry, 0);
+                            psessionEntry, WDA_GET_RX_RSSI_DB(pBd));
 #ifdef WLAN_FEATURE_P2P_INTERNAL
     limSendP2PProbeResponse(pMac, pBd, psessionEntry);
 #endif
@@ -798,6 +798,10 @@ limSendSmeProbeReqInd(tpAniSirGlobal pMac,
 
     MTRACE(macTrace(pMac, TRACE_CODE_TX_SME_MSG, psessionEntry->peSessionId,
                                                                msgQ.type));
+
+    if (ProbeReqIELen > sizeof(pSirSmeProbeReqInd->WPSPBCProbeReq.probeReqIE))
+        ProbeReqIELen = sizeof(pSirSmeProbeReqInd->WPSPBCProbeReq.probeReqIE);
+
     pSirSmeProbeReqInd->WPSPBCProbeReq.probeReqIELen = (tANI_U16)ProbeReqIELen;
     vos_mem_copy(pSirSmeProbeReqInd->WPSPBCProbeReq.probeReqIE, pProbeReqIE, ProbeReqIELen);
     

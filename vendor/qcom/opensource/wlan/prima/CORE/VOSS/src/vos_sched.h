@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2017  The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2018 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -73,8 +73,17 @@
 #include "i_vos_types.h"
 #include "i_vos_packet.h"
 #include <linux/wait.h>
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 19, 0)) && \
+	defined(WLAN_OPEN_SOURCE)
+#include <linux/device.h>
+#include <linux/pm_wakeup.h>
+#else
 #include <linux/wakelock.h>
+#endif
+
 #include <vos_timer.h>
+#include <vos_api.h>
 
 
 #define TX_POST_EVENT               0x000
@@ -367,6 +376,7 @@ typedef struct _VosContextType
    spinlock_t wdthread_work_lock;
    bool snoc_high_freq_voting;
    spinlock_t freq_voting_lock;
+   enum vos_hang_reason recovery_reason;
 } VosContextType, *pVosContextType;
 
 
@@ -379,6 +389,7 @@ int vos_sched_is_tx_thread(int threadID);
 int vos_sched_is_rx_thread(int threadID);
 int vos_sched_is_mc_thread(int threadID);
 void vos_thread_stuck_timer_init(pVosWatchdogContext pWdContext);
+
 /*---------------------------------------------------------------------------
   
   \brief vos_sched_open() - initialize the vOSS Scheduler  
@@ -538,6 +549,12 @@ void vos_ssr_unprotect(const char *caller_func);
 void vos_wd_reset_thread_stuck_count(int threadId);
 bool vos_is_wd_thread(int threadId);
 void vos_dump_stack(uint8_t value);
-
-
+void vos_dump_thread_stacks(int threadId);
+/**
+ * vos_get_gfp_flags(): get GFP flags
+ *
+ * Based on the scheduled context, return GFP flags
+ * Return: gfp flags
+ */
+int vos_get_gfp_flags(void);
 #endif // #if !defined __VOSS_SCHED_H
