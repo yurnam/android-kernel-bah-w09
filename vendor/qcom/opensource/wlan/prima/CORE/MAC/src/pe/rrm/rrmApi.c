@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2015, 2017 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2015 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -282,25 +282,59 @@ rrmProcessLinkMeasurementRequest( tpAniSirGlobal pMac,
       return eSIR_FAILURE;
    }
    pHdr = WDA_GET_RX_MAC_HEADER( pRxPacketInfo );
-   LinkReport.txPower = limGetMaxTxPower (pSessionEntry->def_max_tx_pwr,
-       pLinkReq->MaxTxPower.maxTxPower,
-       pMac->roam.configParam.nTxPowerCap);
-
-   if ((LinkReport.txPower != (uint8)(pSessionEntry->maxTxPower)) &&
-       (eSIR_SUCCESS == rrmSendSetMaxTxPowerReq (pMac,
-                                                 (tPowerdBm)(LinkReport.txPower),
-                                                 pSessionEntry)))
+   if( (uint8)(pSessionEntry->maxTxPower) != pLinkReq->MaxTxPower.maxTxPower )
    {
-     PELOGW (limLog (pMac,
-           LOGW,
-           FL(" maxTx power in link report is not same as local..."
-             " Local = %d Link Request TxPower = %d"
-             " Link Report TxPower = %d"),
-           pSessionEntry->maxTxPower,
-           LinkReport.txPower,
-           pLinkReq->MaxTxPower.maxTxPower);)
-       pSessionEntry->maxTxPower = (tPowerdBm)(LinkReport.txPower);
+      PELOGW(limLog( pMac,
+                     LOGW,
+                     FL(" maxTx power in link request is not same as local... "
+                        " Local = %d LinkReq = %d"),
+                     pSessionEntry->maxTxPower,
+                     pLinkReq->MaxTxPower.maxTxPower );)
+      if( (MIN_STA_PWR_CAP_DBM <= pLinkReq->MaxTxPower.maxTxPower) &&
+         (MAX_STA_PWR_CAP_DBM >= pLinkReq->MaxTxPower.maxTxPower) )
+      {
+         LinkReport.txPower = pLinkReq->MaxTxPower.maxTxPower;
+      }
+      else if( MIN_STA_PWR_CAP_DBM > pLinkReq->MaxTxPower.maxTxPower )
+      {
+         LinkReport.txPower = MIN_STA_PWR_CAP_DBM;
+      }
+      else if( MAX_STA_PWR_CAP_DBM < pLinkReq->MaxTxPower.maxTxPower )
+      {
+         LinkReport.txPower = MAX_STA_PWR_CAP_DBM;
+      }
+
+      if( (LinkReport.txPower != (uint8)(pSessionEntry->maxTxPower)) &&
+          (eSIR_SUCCESS == rrmSendSetMaxTxPowerReq ( pMac,
+                                                     (tPowerdBm)(LinkReport.txPower),
+                                                     pSessionEntry)) )
+      {
+         pSessionEntry->maxTxPower = (tPowerdBm)(LinkReport.txPower);
+      }
    }
+   else
+   {
+      if( (MIN_STA_PWR_CAP_DBM <= (uint8)(pSessionEntry->maxTxPower)) &&
+         (MAX_STA_PWR_CAP_DBM >= (uint8)(pSessionEntry->maxTxPower)) )
+      {
+         LinkReport.txPower = (uint8)(pSessionEntry->maxTxPower);
+      }
+      else if( MIN_STA_PWR_CAP_DBM > (uint8)(pSessionEntry->maxTxPower) )
+      {
+         LinkReport.txPower = MIN_STA_PWR_CAP_DBM;
+      }
+      else if( MAX_STA_PWR_CAP_DBM < (uint8)(pSessionEntry->maxTxPower) )
+      {
+         LinkReport.txPower = MAX_STA_PWR_CAP_DBM;
+      }
+   }
+   PELOGW(limLog( pMac,
+                  LOGW,
+                  FL(" maxTx power in link request is not same as local... "
+                     " Local = %d Link Report TxPower = %d"),
+                  pSessionEntry->maxTxPower,
+                  LinkReport.txPower );)
+
    LinkReport.dialogToken = pLinkReq->DialogToken.token;
    LinkReport.rxAntenna = 0;
    LinkReport.txAntenna = 0;
@@ -622,25 +656,14 @@ rrmProcessBeaconReportReq( tpAniSirGlobal pMac,
    pSmeBcnReportReq->channelList.numChannels = num_channels;
    if( pBeaconReq->measurement_request.Beacon.num_APChannelReport )
    {
-      tANI_U8 *ch_lst = pSmeBcnReportReq->channelList.channelNumber;
-      tANI_U8 len;
-      tANI_U16 ch_ctr = 0;
-      for(num_APChanReport = 0;
-          num_APChanReport <
-          pBeaconReq->measurement_request.Beacon.num_APChannelReport;
-          num_APChanReport++) {
-              len = pBeaconReq->measurement_request.Beacon.
-                  APChannelReport[num_APChanReport].num_channelList;
-              if (ch_ctr + len >
-                 sizeof(pSmeBcnReportReq->channelList.channelNumber))
-                      break;
+      tANI_U8 *pChanList = pSmeBcnReportReq->channelList.channelNumber;
+      for( num_APChanReport = 0 ; num_APChanReport < pBeaconReq->measurement_request.Beacon.num_APChannelReport ; num_APChanReport++ )
+      {
+         vos_mem_copy(pChanList,
+          pBeaconReq->measurement_request.Beacon.APChannelReport[num_APChanReport].channelList,
+          pBeaconReq->measurement_request.Beacon.APChannelReport[num_APChanReport].num_channelList);
 
-              vos_mem_copy(&ch_lst[ch_ctr],
-                           pBeaconReq->measurement_request.Beacon.
-                           APChannelReport[num_APChanReport].channelList,
-                           len);
-
-              ch_ctr += len;
+         pChanList += pBeaconReq->measurement_request.Beacon.APChannelReport[num_APChanReport].num_channelList;
       }
    }
 
@@ -678,8 +701,7 @@ rrmFillBeaconIes( tpAniSirGlobal pMac,
                   tANI_U8 *eids, tANI_U8 numEids,
                   tpSirBssDescription pBssDesc )
 {
-   tANI_U8 len, *pBcnIes, count = 0, i;
-   tANI_U16 BcnNumIes = 0;
+   tANI_U8 len, *pBcnIes, BcnNumIes, count = 0, i;
 
    if( (pIes == NULL) || (pNumIes == NULL) || (pBssDesc == NULL) )
    {
@@ -704,18 +726,11 @@ rrmFillBeaconIes( tpAniSirGlobal pMac,
    *((tANI_U16*)pIes) = pBssDesc->capabilityInfo;
    *pNumIes+=sizeof(tANI_U16); pIes+=sizeof(tANI_U16);
 
-   while ( BcnNumIes >= 2 )
+   while ( BcnNumIes > 0 )
    {
-      len = *(pBcnIes + 1); //element id + length.
-      len += 2;
+      len = *(pBcnIes + 1) + 2; //element id + length.
       limLog( pMac, LOG3, "EID = %d, len = %d total = %d",
              *pBcnIes, *(pBcnIes+1), len );
-
-      if (BcnNumIes < len || len <= 2) {
-          limLog(pMac, LOGE, "RRM: Invalid IE len:%d exp_len:%d",
-                 len, BcnNumIes);
-          break;
-      }
 
       i = 0;
       do

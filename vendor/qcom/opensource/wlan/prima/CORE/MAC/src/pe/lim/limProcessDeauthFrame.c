@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2014, 2017 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2014 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -36,9 +36,6 @@
 #include "limSerDesUtils.h"
 #include "schApi.h"
 #include "limSendMessages.h"
-#ifdef WLAN_FEATURE_LFR_MBB
-#include "lim_mbb.h"
-#endif
 
 
 
@@ -71,22 +68,17 @@ limProcessDeauthFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tpPESession p
     tpDphHashNode     pStaDs;
     tpPESession       pRoamSessionEntry=NULL;
     tANI_U8           roamSessionId;
+#ifdef WLAN_FEATURE_11W
     tANI_U32          frameLen;
+#endif
+
 
     pHdr = WDA_GET_RX_MAC_HEADER(pRxPacketInfo);
 
     pBody = WDA_GET_RX_MPDU_DATA(pRxPacketInfo);
 
-    frameLen = WDA_GET_RX_PAYLOAD_LEN(pRxPacketInfo);
-    if (frameLen < sizeof(reasonCode)) {
-        PELOGE(limLog(pMac, LOGE,
-                      FL("received invalid framelen %d"), frameLen);)
-        return;
-    }
 
-    if ((eLIM_STA_ROLE == psessionEntry->limSystemRole) &&
-        ((eLIM_SME_WT_DISASSOC_STATE == psessionEntry->limSmeState) ||
-         (eLIM_SME_WT_DEAUTH_STATE == psessionEntry->limSmeState)))
+    if ((eLIM_STA_ROLE == psessionEntry->limSystemRole) && (eLIM_SME_WT_DEAUTH_STATE == psessionEntry->limSmeState))
     {
         /*Every 15th deauth frame will be logged in kmsg*/
         if(!(pMac->lim.deauthMsgCnt & 0xF))
@@ -130,6 +122,7 @@ limProcessDeauthFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tpPESession p
         PELOGE(limLog(pMac, LOGE, FL("received an unprotected deauth from AP"));)
         // If the frame received is unprotected, forward it to the supplicant to initiate
         // an SA query
+        frameLen = WDA_GET_RX_PAYLOAD_LEN(pRxPacketInfo);
 
         //send the unprotected frame indication to SME
         limSendSmeUnprotectedMgmtFrameInd( pMac, pHdr->fc.subType,
@@ -141,7 +134,15 @@ limProcessDeauthFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tpPESession p
 
     // Get reasonCode from Deauthentication frame body
     reasonCode = sirReadU16(pBody); 
-
+#ifdef CONFIG_HUAWEI_WIFI
+    PELOGE(limLog(pMac, LOGE,
+        FL("Received Deauth frame for Addr: "HWMAC_ADDRESS_STR" (mlm state = %s,"
+        " sme state = %d systemrole  = %d) with reason code %d from "
+        MAC_ADDRESS_STR), HWMAC_ADDR_ARRAY(pHdr->da),
+        limMlmStateStr(psessionEntry->limMlmState), psessionEntry->limSmeState,
+        psessionEntry->limSystemRole, reasonCode,
+        MAC_ADDR_ARRAY(pHdr->sa));)
+#else
     PELOGE(limLog(pMac, LOGE,
         FL("Received Deauth frame for Addr: "MAC_ADDRESS_STR" (mlm state = %s,"
         " sme state = %d systemrole  = %d) with reason code %d from "
@@ -149,7 +150,8 @@ limProcessDeauthFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tpPESession p
         limMlmStateStr(psessionEntry->limMlmState), psessionEntry->limSmeState,
         psessionEntry->limSystemRole, reasonCode,
         MAC_ADDR_ARRAY(pHdr->sa));)
-      
+#endif
+
     if (limCheckDisassocDeauthAckPending(pMac, (tANI_U8*)pHdr->sa))
     {
         PELOGE(limLog(pMac, LOGE,
@@ -236,14 +238,6 @@ limProcessDeauthFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tpPESession p
     {
         pRoamSessionEntry = peFindSessionByBssid(pMac, psessionEntry->limReAssocbssId, &roamSessionId);
     }
-
-#ifdef WLAN_FEATURE_LFR_MBB
-    if (lim_is_mbb_reassoc_in_progress(pMac, psessionEntry)) {
-        limLog(pMac, LOGE, FL("Ignore Deauth frame as LFR MBB in progress"));
-        return;
-    }
-#endif
-
     if (limIsReassocInProgress(pMac,psessionEntry) || limIsReassocInProgress(pMac,pRoamSessionEntry)) {
         if (!IS_REASSOC_BSSID(pMac,pHdr->sa,psessionEntry)) {
             PELOGE(limLog(pMac, LOGE, FL("Rcv Deauth from unknown/different "
@@ -470,8 +464,7 @@ limProcessDeauthFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tpPESession p
     }
 
     if ((pStaDs->mlmStaContext.mlmState == eLIM_MLM_WT_DEL_STA_RSP_STATE) ||
-        (pStaDs->mlmStaContext.mlmState == eLIM_MLM_WT_DEL_BSS_RSP_STATE) ||
-         pStaDs->sta_deletion_in_progress)
+        (pStaDs->mlmStaContext.mlmState == eLIM_MLM_WT_DEL_BSS_RSP_STATE))
     {
         /**
          * Already in the process of deleting context for the peer
@@ -480,15 +473,13 @@ limProcessDeauthFrame(tpAniSirGlobal pMac, tANI_U8 *pRxPacketInfo, tpPESession p
         PELOGE(limLog(pMac, LOGE,
            FL("received Deauth frame from peer that is in state %d, addr "
            MAC_ADDRESS_STR", isDisassocDeauthInProgress : %d\n"),
-
            pStaDs->mlmStaContext.mlmState,MAC_ADDR_ARRAY(pHdr->sa),
            pStaDs->isDisassocDeauthInProgress);)
-
         return;
     } 
     pStaDs->mlmStaContext.disassocReason = (tSirMacReasonCodes)reasonCode;
     pStaDs->mlmStaContext.cleanupTrigger = eLIM_PEER_ENTITY_DEAUTH;
-    pStaDs->sta_deletion_in_progress = true;
+
 
     /* send the LOST_LINK_PARAMS_IND to SME*/
     limUpdateLostLinkParams(pMac, psessionEntry, pRxPacketInfo);

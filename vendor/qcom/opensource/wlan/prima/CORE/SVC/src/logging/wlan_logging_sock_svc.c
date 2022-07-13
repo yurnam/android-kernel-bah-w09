@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2014-2018 The Linux Foundation. All rights reserved.
+* Copyright (c) 2014-2016 The Linux Foundation. All rights reserved.
 *
 * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
 *
@@ -193,7 +193,6 @@ struct wlan_logging {
 	struct fw_mem_dump_logging fw_mem_dump_ctx;
         int pkt_stat_num_buf;
 	unsigned int pkt_stat_drop_cnt;
-	unsigned int malloc_fail_count;
 	struct list_head pkt_stat_free_list;
 	struct list_head pkt_stat_filled_list;
 	struct pkt_stats_msg *pkt_stats_pcur_node;
@@ -281,7 +280,7 @@ static int wlan_send_sock_msg_to_app(tAniHdr *wmsg, int radio,
 	tAniNlHdr *wnl = NULL;
 	struct sk_buff *skb;
 	struct nlmsghdr *nlh;
-	int wmsg_length = ntohs(wmsg->length);
+	int wmsg_length = wmsg->length;
 	static int nlmsg_seq;
 
 	if (radio < 0 || radio > ANI_MAX_RADIOS) {
@@ -291,7 +290,6 @@ static int wlan_send_sock_msg_to_app(tAniHdr *wmsg, int radio,
 	}
 
 	payload_len = wmsg_length + sizeof(wnl->radio) + sizeof(tAniHdr);
-
 	tot_msg_len = NLMSG_SPACE(payload_len);
 	skb = dev_alloc_skb(tot_msg_len);
 	if (skb == NULL) {
@@ -408,51 +406,34 @@ bool wlan_isPktStatsEnabled(void)
 
 
 /* Need to call this with spin_lock acquired */
-static int wlan_queue_pkt_stats_for_app(struct sk_buff *skb_to_free)
+static int wlan_queue_pkt_stats_for_app(void)
 {
 	int ret = 0;
-	struct sk_buff *skb_new = NULL;
-	struct pkt_stats_msg *tmp_node = NULL;
+
+	list_add_tail(&gwlan_logging.pkt_stats_pcur_node->node,
+			&gwlan_logging.pkt_stat_filled_list);
 
 	if (!list_empty(&gwlan_logging.pkt_stat_free_list)) {
-		/* Add current node to end of filled list */
-		list_add_tail(&gwlan_logging.pkt_stats_pcur_node->node,
-			&gwlan_logging.pkt_stat_filled_list);
-
 		/* Get buffer from free list */
 		gwlan_logging.pkt_stats_pcur_node =
-			(struct pkt_stats_msg *)(gwlan_logging.
-			pkt_stat_free_list.next);
+			(struct pkt_stats_msg *)(gwlan_logging.pkt_stat_free_list.next);
 		list_del_init(gwlan_logging.pkt_stat_free_list.next);
 	} else if (!list_empty(&gwlan_logging.pkt_stat_filled_list)) {
-		/*
-		 * Get buffer from filled list, free the skb and allocate a
-		 * new skb so that the current node has a clean skb
-		 */
-		tmp_node = (struct pkt_stats_msg *)(gwlan_logging.
-			pkt_stat_filled_list.next);
-
-		skb_new = dev_alloc_skb(MAX_PKTSTATS_LOG_LENGTH);
-		if (skb_new == NULL) {
-			/* Print error for every 512 malloc fails */
-			gwlan_logging.malloc_fail_count++;
-			return -ENOMEM;
-		}
-		skb_to_free = tmp_node->skb;
-		tmp_node->skb = skb_new;
-
-		/*
-		 * This condition will drop the packet from being
+		/* Get buffer from filled list */
+		/* This condition will drop the packet from being
 		 * indicated to app
 		 */
+		gwlan_logging.pkt_stats_pcur_node =
+			(struct pkt_stats_msg *)(gwlan_logging.pkt_stat_filled_list.next);
 		++gwlan_logging.pkt_stat_drop_cnt;
-
-		/* Add current node to end of filled list */
-		list_add_tail(&gwlan_logging.pkt_stats_pcur_node->node,
-			&gwlan_logging.pkt_stat_filled_list);
-
-		gwlan_logging.pkt_stats_pcur_node = tmp_node;
-		list_del_init((struct list_head *) tmp_node);
+		/* print every 64th drop count */
+		if (vos_is_multicast_logging() &&
+			(!(gwlan_logging.pkt_stat_drop_cnt % 0x40))) {
+			pr_err("%s: drop_count = %u  filled_length = %d\n",
+				__func__, gwlan_logging.pkt_stat_drop_cnt,
+				gwlan_logging.pkt_stats_pcur_node->skb->len);
+		}
+		list_del_init(gwlan_logging.pkt_stat_filled_list.next);
 		ret = 1;
 	}
 
@@ -461,7 +442,6 @@ static int wlan_queue_pkt_stats_for_app(struct sk_buff *skb_to_free)
 	return ret;
 }
 
-#ifdef FEATURE_WLAN_DIAG_SUPPORT
 int wlan_pkt_stats_to_user(void *perPktStat)
 {
 	bool wake_up_thread = false;
@@ -469,9 +449,7 @@ int wlan_pkt_stats_to_user(void *perPktStat)
 	unsigned long flags;
 	tx_rx_pkt_stats rx_tx_stats;
 	int total_log_len = 0;
-	int ret = 0;
 	struct sk_buff *ptr;
-	struct sk_buff *skb_to_free = NULL;
 	tpSirMacMgmtHdr hdr;
 	uint32 rateIdx;
 
@@ -547,42 +525,19 @@ int wlan_pkt_stats_to_user(void *perPktStat)
 		return -EIO;
 	}
 
-	/* Check if we can accomodate more log into current node/buffer */
+	;
+
+	 /* Check if we can accomodate more log into current node/buffer */
 	if (total_log_len + sizeof(vos_log_pktlog_info) + sizeof(tAniNlHdr) >=
-	    skb_tailroom(gwlan_logging.pkt_stats_pcur_node->skb)) {
-		ret = wlan_queue_pkt_stats_for_app(skb_to_free);
-		if (ret == -ENOMEM) {
-			spin_unlock_irqrestore(&gwlan_logging.pkt_stats_lock,
-					       flags);
-			/* Print every 64 malloc fails */
-			if (!(gwlan_logging.malloc_fail_count % 64))
-				pr_err("%s: dev_alloc_skb() failed for msg size[%d]",
-					__func__, MAX_PKTSTATS_LOG_LENGTH);
-			return ret;
-		}
+		skb_tailroom(gwlan_logging.pkt_stats_pcur_node->skb)) {
 		wake_up_thread = true;
+		wlan_queue_pkt_stats_for_app();
 	}
 	ptr = gwlan_logging.pkt_stats_pcur_node->skb;
 
+
 	vos_mem_copy(skb_put(ptr, total_log_len), &rx_tx_stats, total_log_len);
 	spin_unlock_irqrestore(&gwlan_logging.pkt_stats_lock, flags);
-
-	/*
-	 * If ret is non-zero and not ENOMEM, we have re-allocated from
-	 * filled list, free the older skb and print every 64th drop count
-	 */
-	if (ret) {
-		if (skb_to_free)
-			dev_kfree_skb(skb_to_free);
-
-		/* print every 64th drop count */
-		if (vos_is_multicast_logging() &&
-		    (!(gwlan_logging.pkt_stat_drop_cnt % 0x40))) {
-			pr_err("%s: drop_count = %u\n",
-				__func__, gwlan_logging.pkt_stat_drop_cnt);
-		}
-	}
-
 	/* Wakeup logger thread */
 	if ((true == wake_up_thread)) {
 			/* If there is logger app registered wakeup the logging
@@ -594,48 +549,15 @@ int wlan_pkt_stats_to_user(void *perPktStat)
 	}
 	return 0;
 }
-#else
-__inline int wlan_pkt_stats_to_user(void *perPktStat)
-{
-	return 0;
-}
-#endif
-
 
 void wlan_disable_and_flush_pkt_stats()
 {
 	unsigned long flags;
-	int ret = 0;
-	struct sk_buff *skb_to_free = NULL;
-
-
 	spin_lock_irqsave(&gwlan_logging.pkt_stats_lock, flags);
 	if(gwlan_logging.pkt_stats_pcur_node->skb->len){
-		ret = wlan_queue_pkt_stats_for_app(skb_to_free);
+		wlan_queue_pkt_stats_for_app();
 	}
 	spin_unlock_irqrestore(&gwlan_logging.pkt_stats_lock, flags);
-
-	/*
-	 * If ret is non-zero and not ENOMEM, we have re-allocated from
-	 * filled list, free the older skb and print every 64th drop count
-	 */
-	if (ret == -ENOMEM) {
-		/* Print every 64 malloc fails */
-		if (!(gwlan_logging.malloc_fail_count % 64))
-			pr_err("%s: dev_alloc_skb() failed for msg size[%d]",
-				__func__, MAX_PKTSTATS_LOG_LENGTH);
-	} else if (ret) {
-		if (skb_to_free)
-			dev_kfree_skb(skb_to_free);
-
-		/* print every 64th drop count */
-		if (vos_is_multicast_logging() &&
-		    (!(gwlan_logging.pkt_stat_drop_cnt % 0x40))) {
-			pr_err("%s: drop_count = %u\n",
-				__func__, gwlan_logging.pkt_stat_drop_cnt);
-		}
-	}
-
 	set_bit(HOST_PKT_STATS_POST, &gwlan_logging.event_flag);
 	wake_up_interruptible(&gwlan_logging.wait_queue);
 }
@@ -675,7 +597,7 @@ int wlan_log_to_user(VOS_TRACE_LEVEL log_level, char *to_be_sent, int length)
 	local_time = (u32)(tv.tv_sec - (sys_tz.tz_minuteswest * 60));
 	rtc_time_to_tm(local_time, &tm);
         /* Firmware Time Stamp */
-        qtimer_ticks =  __vos_get_log_timestamp();
+        qtimer_ticks =  arch_counter_get_cntpct();
 
         tlen = snprintf(tbuf, sizeof(tbuf), "[%02d:%02d:%02d.%06lu] [%016llX]"
                         " [%.5s] ", tm.tm_hour, tm.tm_min, tm.tm_sec, tv.tv_usec,
@@ -816,8 +738,8 @@ static int send_fw_log_pkt_to_user(void)
 		msg_header.wmsg.length = skb->len;
 
 		if (unlikely(skb_headroom(skb) < sizeof(msg_header))) {
-			pr_err("VPKT [%d]: Insufficient headroom, head[%pK],"
-				" data[%pK], req[%zu]", __LINE__, skb->head,
+			pr_err("VPKT [%d]: Insufficient headroom, head[%p],"
+				" data[%p], req[%zu]", __LINE__, skb->head,
 				skb->data, sizeof(msg_header));
 			return -EIO;
 		}
@@ -912,8 +834,8 @@ static int send_data_mgmt_log_pkt_to_user(void)
 		msg_header.frameSize = WLAN_MGMT_LOGGING_FRAMESIZE_128BYTES;
 
 		if (unlikely(skb_headroom(skb) < sizeof(msg_header))) {
-			pr_err("VPKT [%d]: Insufficient headroom, head[%pK],"
-				" data[%pK], req[%zu]", __LINE__, skb->head,
+			pr_err("VPKT [%d]: Insufficient headroom, head[%p],"
+				" data[%p], req[%zu]", __LINE__, skb->head,
 				skb->data, sizeof(msg_header));
 			return -EIO;
 		}
@@ -1097,7 +1019,7 @@ static int send_filled_buffers_to_user(void)
 	return ret;
 }
 
-#ifdef FEATURE_WLAN_DIAG_SUPPORT
+
 static int send_per_pkt_stats_to_user(void)
 {
 	int ret = -1;
@@ -1143,8 +1065,8 @@ static int send_per_pkt_stats_to_user(void)
 		pktlog.seq_no = gwlan_logging.pkt_stats_msg_idx++;
 
 		if (unlikely(skb_headroom(plog_msg->skb) < sizeof(vos_log_pktlog_info))) {
-			pr_err("VPKT [%d]: Insufficient headroom, head[%pK],"
-				" data[%pK], req[%zu]", __LINE__, plog_msg->skb->head,
+			pr_err("VPKT [%d]: Insufficient headroom, head[%p],"
+				" data[%p], req[%zu]", __LINE__, plog_msg->skb->head,
 				plog_msg->skb->data, sizeof(msg_header));
 			ret = -EIO;
 			free_old_skb = true;
@@ -1154,8 +1076,8 @@ static int send_per_pkt_stats_to_user(void)
 							sizeof(vos_log_pktlog_info));
 
 		if (unlikely(skb_headroom(plog_msg->skb) < sizeof(int))) {
-			pr_err("VPKT [%d]: Insufficient headroom, head[%pK],"
-				" data[%pK], req[%zu]", __LINE__, plog_msg->skb->head,
+			pr_err("VPKT [%d]: Insufficient headroom, head[%p],"
+				" data[%p], req[%zu]", __LINE__, plog_msg->skb->head,
 				plog_msg->skb->data, sizeof(int));
 			ret = -EIO;
 			free_old_skb = true;
@@ -1181,8 +1103,8 @@ static int send_per_pkt_stats_to_user(void)
 		msg_header.wmsg.length = cpu_to_be16(plog_msg->skb->len);
 
 		if (unlikely(skb_headroom(plog_msg->skb) < sizeof(msg_header))) {
-			pr_err("VPKT [%d]: Insufficient headroom, head[%pK],"
-				" data[%pK], req[%zu]", __LINE__, plog_msg->skb->head,
+			pr_err("VPKT [%d]: Insufficient headroom, head[%p],"
+				" data[%p], req[%zu]", __LINE__, plog_msg->skb->head,
 				plog_msg->skb->data, sizeof(msg_header));
 			ret = -EIO;
 			free_old_skb = true;
@@ -1216,12 +1138,6 @@ err:
 
 	return ret;
 }
-#else
-static __inline int send_per_pkt_stats_to_user(void)
-{
-	return 0;
-}
-#endif
 
 /**
  * wlan_logging_thread() - The WLAN Logger thread
@@ -1325,14 +1241,17 @@ static int wlan_logging_thread(void *Arg)
 				 * memdump complete. If it's null,then something is
 				 * not right.
 				 */
-				if (gwlan_logging.fw_mem_dump_ctx.svc_fw_mem_dump_req_cb) {
+				if (gwlan_logging.fw_mem_dump_ctx.svc_fw_mem_dump_req_cb &&
+				    gwlan_logging.fw_mem_dump_ctx.svc_fw_mem_dump_req_cb_arg) {
 					((hdd_fw_mem_dump_req_cb)
 					gwlan_logging.fw_mem_dump_ctx.svc_fw_mem_dump_req_cb)(
+					(struct hdd_fw_mem_dump_req_ctx*)
 					gwlan_logging.fw_mem_dump_ctx.svc_fw_mem_dump_req_cb_arg);
 
 					/*invalidate the callback pointers*/
 					spin_lock_irqsave(&gwlan_logging.fw_mem_dump_ctx.fw_mem_dump_lock,flags);
 					gwlan_logging.fw_mem_dump_ctx.svc_fw_mem_dump_req_cb = NULL;
+					gwlan_logging.fw_mem_dump_ctx.svc_fw_mem_dump_req_cb_arg = NULL;
 					spin_unlock_irqrestore(&gwlan_logging.fw_mem_dump_ctx.fw_mem_dump_lock,flags);
 				}
 		}
@@ -1343,8 +1262,7 @@ static int wlan_logging_thread(void *Arg)
 		}
 	}
 
-	complete(&gwlan_logging.shutdown_comp);
-	do_exit(0);
+	complete_and_exit(&gwlan_logging.shutdown_comp, 0);
 
 	return 0;
 }
@@ -1357,7 +1275,7 @@ static int wlan_logging_proc_sock_rx_msg(struct sk_buff *skb)
 	tAniNlHdr *wnl;
 	int radio;
 	int type;
-	int ret, len;
+	int ret;
 	unsigned long flags;
 
         if (TRUE == vos_isUnloadInProgress())
@@ -1376,12 +1294,10 @@ static int wlan_logging_proc_sock_rx_msg(struct sk_buff *skb)
 		return -EINVAL;
 	}
 
-	len = ntohs(wnl->wmsg.length) + sizeof(tAniNlHdr);
-
-	if (len > skb_headlen(skb))
+	if (wnl->wmsg.length > skb->data_len)
 	{
-		pr_err("%s: invalid length, msgLen:%x skb len:%x headLen: %d data_len: %d",
-		       __func__, len, skb->len, skb_headlen(skb), skb->data_len);
+		pr_err("%s: invalid length msgLen:%x skb data_len:%x \n",
+		       __func__, wnl->wmsg.length, skb->data_len);
 		return -EINVAL;
 	}
 
@@ -1491,7 +1407,6 @@ int wlan_logging_sock_activate_svc(int log_fe_to_console, int num_buf,
 	int i, j = 0;
 	unsigned long irq_flag;
 	bool failure = FALSE;
-	struct log_msg *temp;
 
 	pr_info("%s: Initalizing FEConsoleLog = %d NumBuff = %d\n",
 			__func__, log_fe_to_console, num_buf);
@@ -1583,12 +1498,10 @@ err:
 		pr_err("%s: Could not Create LogMsg Thread Controller",
 		       __func__);
 		spin_lock_irqsave(&gwlan_logging.spin_lock, irq_flag);
-		temp = gplog_msg;
+		vfree(gplog_msg);
 		gplog_msg = NULL;
 		gwlan_logging.pcur_node = NULL;
 		spin_unlock_irqrestore(&gwlan_logging.spin_lock, irq_flag);
-		vfree(temp);
-		temp = NULL;
 		return -ENOMEM;
 	}
 	wake_up_process(gwlan_logging.thread);
@@ -1650,7 +1563,6 @@ int wlan_logging_sock_deactivate_svc(void)
 {
 	unsigned long irq_flag;
 	int i;
-	struct log_msg *temp;
 
 	if (!gplog_msg)
 		return 0;
@@ -1660,7 +1572,6 @@ int wlan_logging_sock_deactivate_svc(void)
 	gapp_pid = INVALID_PID;
 
 	INIT_COMPLETION(gwlan_logging.shutdown_comp);
-	wmb();
 	gwlan_logging.exit = true;
 	gwlan_logging.is_active = false;
 	vos_set_multicast_logging(0);
@@ -1668,12 +1579,10 @@ int wlan_logging_sock_deactivate_svc(void)
 	wait_for_completion(&gwlan_logging.shutdown_comp);
 
 	spin_lock_irqsave(&gwlan_logging.spin_lock, irq_flag);
-	temp = gplog_msg;
+	vfree(gplog_msg);
 	gplog_msg = NULL;
 	gwlan_logging.pcur_node = NULL;
 	spin_unlock_irqrestore(&gwlan_logging.spin_lock, irq_flag);
-	vfree(temp);
-	temp = NULL;
 
 	spin_lock_irqsave(&gwlan_logging.pkt_stats_lock, irq_flag);
 	/* free allocated skb */
@@ -2115,7 +2024,7 @@ size_t wlan_fwr_mem_dump_fsread_handler(char __user *buf,
 {
 	if (buf == NULL || gwlan_logging.fw_mem_dump_ctx.fw_dump_start_loc == NULL)
 	{
-		pr_err("%s : start loc : %pK buf : %pK ",__func__,gwlan_logging.fw_mem_dump_ctx.fw_dump_start_loc,buf);
+		pr_err("%s : start loc : %p buf : %p ",__func__,gwlan_logging.fw_mem_dump_ctx.fw_dump_start_loc,buf);
 		return 0;
 	}
 
@@ -2169,7 +2078,73 @@ void wlan_store_fwr_mem_dump_size(uint32 dump_size)
 	gwlan_logging.fw_mem_dump_ctx.fw_dump_max_size = dump_size;
 	spin_unlock_irqrestore(&gwlan_logging.fw_mem_dump_ctx.fw_mem_dump_lock, flags);
 }
+/**
+ * wlan_indicate_mem_dump_complete() -  When H2H for mem
+ * dump finish invoke the handler.
+ *
+ * This is a handler used to indicate user space about the
+ * availability for firmware memory dump via vendor event.
+ *
+ * Return: None
+ */
+void wlan_indicate_mem_dump_complete(bool status )
+{
+	hdd_context_t *hdd_ctx;
+	void *vos_ctx;
+	int ret;
+	struct sk_buff *skb = NULL;
+	vos_ctx = vos_get_global_context(VOS_MODULE_ID_SYS, NULL);
+	if (!vos_ctx) {
+		pr_err("Invalid VOS context");
+		return;
+	}
 
+	hdd_ctx = vos_get_context(VOS_MODULE_ID_HDD, vos_ctx);
+	if(!hdd_ctx) {
+		pr_err("Invalid HDD context");
+		return;
+	}
+
+	ret = wlan_hdd_validate_context(hdd_ctx);
+	if (0 != ret) {
+		pr_err("HDD context is not valid");
+		return;
+	}
+
+
+	skb = cfg80211_vendor_cmd_alloc_reply_skb(hdd_ctx->wiphy,
+		sizeof(uint32_t) + NLA_HDRLEN + NLMSG_HDRLEN);
+
+	if (!skb) {
+		pr_err("cfg80211_vendor_event_alloc failed");
+		return;
+	}
+	if(status)
+	{
+		if (nla_put_u32(skb, QCA_WLAN_VENDOR_ATTR_MEMDUMP_SIZE,
+				gwlan_logging.fw_mem_dump_ctx.fw_dump_max_size)) {
+			pr_err("nla put fail");
+			goto nla_put_failure;
+		}
+	}
+	else
+	{
+		pr_err("memdump failed.Returning size 0 to user");
+		if (nla_put_u32(skb, QCA_WLAN_VENDOR_ATTR_MEMDUMP_SIZE,
+				0)) {
+			pr_err("nla put fail");
+			goto nla_put_failure;
+		}
+	}
+	/*indicate mem dump complete*/
+	cfg80211_vendor_cmd_reply(skb);
+	pr_info("Memdump event sent successfully to user space : recvd size %d",(int)(gwlan_logging.fw_mem_dump_ctx.fw_dump_current_loc - gwlan_logging.fw_mem_dump_ctx.fw_dump_start_loc));
+	return;
+
+nla_put_failure:
+	kfree_skb(skb);
+	return;
+}
 #ifdef FEATURE_WLAN_DIAG_SUPPORT
 /**
  * wlan_report_log_completion() - Report bug report completion to userspace
