@@ -1,0 +1,2 @@
+kernel/drivers/rtc/rtc-efi.ko
+kernel/drivers/rtc/rtc-xgene.ko
