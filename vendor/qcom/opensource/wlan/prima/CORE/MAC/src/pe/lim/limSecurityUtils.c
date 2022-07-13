@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015, 2017 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2015 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -433,7 +433,7 @@ limDeletePreAuthNode(tpAniSirGlobal pMac, tSirMacAddr macAddr)
 
         limLog(pMac, LOG1, FL(" first node to delete"));
         limLog(pMac, LOG1,
-               FL(" Release data entry:%pK idx %d peer: " MAC_ADDRESS_STR),
+               FL(" Release data entry:%p idx %d peer: " MAC_ADDRESS_STR),
                                          pTempNode, pTempNode->authNodeIdx,
                                                    MAC_ADDR_ARRAY(macAddr));
         limReleasePreAuthNode(pMac, pTempNode);
@@ -455,7 +455,7 @@ limDeletePreAuthNode(tpAniSirGlobal pMac, tSirMacAddr macAddr)
 
             limLog(pMac, LOG1, FL(" subsequent node to delete"));
             limLog(pMac, LOG1,
-                   FL("Release data entry: %pK id %d peer: "MAC_ADDRESS_STR),
+                   FL("Release data entry: %p id %d peer: "MAC_ADDRESS_STR),
                    pTempNode, pTempNode->authNodeIdx, MAC_ADDR_ARRAY(macAddr));
             limReleasePreAuthNode(pMac, pTempNode);
 
@@ -472,6 +472,62 @@ limDeletePreAuthNode(tpAniSirGlobal pMac, tSirMacAddr macAddr)
     limPrintMacAddr(pMac, macAddr, LOGP);
 
 } /*** end limDeletePreAuthNode() ***/
+
+
+/**
+* limProcessAuthRetry()
+*
+*FUNCTION:
+* This function is called to process Auth Retry request
+* send during joining process.
+*
+*LOGIC:
+*
+*ASSUMPTIONS:
+*
+*NOTE:
+*
+* @param pMac Pointer to Global MAC structure
+* @return None
+*/
+void limProcessAuthRetry(tpAniSirGlobal pMac)
+{
+        tSirMacAuthFrameBody authFrameBody;
+        tpPESession psessionEntry;
+        if ((psessionEntry =
+            peFindSessionBySessionId(pMac,
+                pMac->lim.limTimers.gLimPeriodicAuthRetryTimer.sessionId))
+                == NULL)
+        {
+            limLog(pMac, LOGE, FL("session does not exist for given SessionId : %d"),pMac->lim.limTimers.gLimPeriodicAuthRetryTimer.sessionId);
+            return;
+        }
+        /// Prepare & send Authentication frame
+        authFrameBody.authAlgoNumber =
+            (tANI_U8) pMac->lim.gpLimMlmAuthReq->authType;
+        authFrameBody.authTransactionSeqNumber = SIR_MAC_AUTH_FRAME_1;
+        authFrameBody.authStatusCode = 0;
+        limLog(pMac, LOGW, FL("Retry Auth"));
+        pMac->authAckStatus = LIM_AUTH_ACK_NOT_RCD;
+        limSendAuthMgmtFrame(pMac,
+            &authFrameBody,
+            pMac->lim.gpLimMlmAuthReq->peerMacAddr,
+            LIM_NO_WEP_IN_FC, psessionEntry, eSIR_TRUE);
+
+        if (tx_timer_activate(&pMac->lim.limTimers.gLimAuthFailureTimer)
+            != TX_SUCCESS)
+        {
+            limLog(pMac, LOGP,
+                FL("could not start Auth failure timer"));
+        } else {
+            // Activate Auth Retry timer
+            if(tx_timer_activate(&pMac->lim.limTimers.gLimPeriodicAuthRetryTimer)
+                != TX_SUCCESS)
+                limLog(pMac, LOGP, FL("could not activate Auth Retry timer"));
+        }
+}
+
+
 
 /**
  * limRestoreFromPreAuthState
@@ -518,14 +574,10 @@ limRestoreFromAuthState(tpAniSirGlobal pMac, tSirResultCodes resultCode, tANI_U1
      * retry is needed also cancel the auth rety timer
      */
     pMac->authAckStatus = LIM_AUTH_ACK_RCD_SUCCESS;
-    /* Auth retry and AUth failure timers are not started for SAE
-     * Change' timer for future activations
-     */
-    if (tx_timer_running(&pMac->lim.limTimers.gLimPeriodicAuthRetryTimer))
-        limDeactivateAndChangeTimer(pMac, eLIM_AUTH_RETRY_TIMER);
-    /* Change' timer for future activations */
-    if (tx_timer_running(&pMac->lim.limTimers.gLimAuthFailureTimer))
-        limDeactivateAndChangeTimer(pMac, eLIM_AUTH_FAIL_TIMER);
+    // 'Change' timer for future activations
+    limDeactivateAndChangeTimer(pMac, eLIM_AUTH_RETRY_TIMER);
+    // 'Change' timer for future activations
+    limDeactivateAndChangeTimer(pMac, eLIM_AUTH_FAIL_TIMER);
 
     #if 0
     if (wlan_cfgGetStr(pMac, WNI_CFG_BSSID, currentBssId, &cfg) != eSIR_SUCCESS)
@@ -541,13 +593,12 @@ limRestoreFromAuthState(tpAniSirGlobal pMac, tSirResultCodes resultCode, tANI_U1
         pMac->lim.gLimPreAuthChannelNumber = 0;
     }
 
-    if ((protStatusCode == eSIR_MAC_MAX_ASSOC_STA_REACHED_STATUS)
-             && (sessionEntry->sta_auth_retries_for_code17 <
-                            pMac->sta_auth_retries_for_code17)) {
-        limLog(pMac, LOG1, FL("Retry Auth "));
-        limDoSendAuthMgmtFrame(pMac, sessionEntry);
-        sessionEntry->sta_auth_retries_for_code17++;
-    } else {
+    if (protStatusCode == eSIR_MAC_MAX_ASSOC_STA_REACHED_STATUS
+        && pMac->lim.auth_retry < MAX_NUM_AUTH_RETRIES)
+    {
+        limProcessAuthRetry(pMac);
+        pMac->lim.auth_retry ++;
+    }else{
         /// Free up buffer allocated
         /// for pMac->lim.gLimMlmAuthReq
         vos_mem_free(pMac->lim.gpLimMlmAuthReq);
@@ -556,9 +607,9 @@ limRestoreFromAuthState(tpAniSirGlobal pMac, tSirResultCodes resultCode, tANI_U1
         sessionEntry->limMlmState = sessionEntry->limPrevMlmState;
 
         limPostSmeMessage(pMac,
-                      LIM_MLM_AUTH_CNF,
-                      (tANI_U32 *) &mlmAuthCnf);
-        sessionEntry->sta_auth_retries_for_code17 = 0;
+            LIM_MLM_AUTH_CNF,
+            (tANI_U32 *) &mlmAuthCnf);
+        pMac->lim.auth_retry = 0;
     }
 } /*** end limRestoreFromAuthState() ***/
 
@@ -623,10 +674,7 @@ limEncryptAuthFrame(tpAniSirGlobal pMac, tANI_U8 keyId, tANI_U8 *pKey, tANI_U8 *
                     tANI_U8 *pEncrBody, tANI_U32 keyLength)
 {
     tANI_U8  seed[LIM_SEED_LENGTH], icv[SIR_MAC_WEP_ICV_LENGTH];
-    tANI_U16 frame_len;
 
-    frame_len = ((tpSirMacAuthFrameBody)pPlainText)->length +
-		 SIR_MAC_AUTH_FRAME_INFO_LEN + SIR_MAC_CHALLENGE_ID_LEN;
     keyLength += 3;
 
     // Bytes 0-2 of seed is IV
@@ -637,15 +685,15 @@ limEncryptAuthFrame(tpAniSirGlobal pMac, tANI_U8 keyId, tANI_U8 *pKey, tANI_U8 *
     vos_mem_copy((tANI_U8 *) &seed[3], pKey, keyLength - 3);
 
     // Compute CRC-32 and place them in last 4 bytes of plain text
-    limComputeCrc32(icv, pPlainText, frame_len);
+    limComputeCrc32(icv, pPlainText, sizeof(tSirMacAuthFrameBody));
 
-    vos_mem_copy( pPlainText + frame_len,
+    vos_mem_copy( pPlainText + sizeof(tSirMacAuthFrameBody),
                   icv, SIR_MAC_WEP_ICV_LENGTH);
 
     // Run RC4 on plain text with the seed
     limRC4(pEncrBody + SIR_MAC_WEP_IV_LENGTH,
            (tANI_U8 *) pPlainText, seed, keyLength,
-           frame_len + SIR_MAC_WEP_ICV_LENGTH);
+           LIM_ENCR_AUTH_BODY_LEN - SIR_MAC_WEP_IV_LENGTH);
 
     // Prepare IV
     pEncrBody[0] = seed[0];
@@ -678,7 +726,7 @@ limEncryptAuthFrame(tpAniSirGlobal pMac, tANI_U8 keyId, tANI_U8 *pKey, tANI_U8 *
  */
 
 void
-limComputeCrc32(tANI_U8 *pDest, tANI_U8 * pSrc, tANI_U16 len)
+limComputeCrc32(tANI_U8 *pDest, tANI_U8 * pSrc, tANI_U8 len)
 {
     tANI_U32 crc;
     int i;
@@ -765,7 +813,7 @@ limRC4(tANI_U8 *pDest, tANI_U8 *pSrc, tANI_U8 *seed, tANI_U32 keyLength, tANI_U1
     {
         tANI_U8 i   = ctx.i;
         tANI_U8 j   = ctx.j;
-        tANI_U16 len = frameLen;
+        tANI_U8 len = (tANI_U8) frameLen;
 
         while (len-- > 0)
         {
@@ -847,7 +895,7 @@ limDecryptAuthFrame(tpAniSirGlobal pMac, tANI_U8 *pKey, tANI_U8 *pEncrBody,
     // Compute CRC-32 and place them in last 4 bytes of encrypted body
     limComputeCrc32(icv,
                     (tANI_U8 *) pPlainBody,
-                    (frameLen - SIR_MAC_WEP_ICV_LENGTH));
+                    (tANI_U8) (frameLen - SIR_MAC_WEP_ICV_LENGTH));
 
     // Compare RX_ICV with computed ICV
     for (i = 0; i < SIR_MAC_WEP_ICV_LENGTH; i++)

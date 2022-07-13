@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2019 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2016 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -46,7 +46,6 @@ typedef enum
     // MAC layer authentication types
     eCSR_AUTH_TYPE_OPEN_SYSTEM,
     eCSR_AUTH_TYPE_SHARED_KEY,
-    eCSR_AUTH_TYPE_SAE,
     eCSR_AUTH_TYPE_AUTOSWITCH,
 
     // Upper layer authentication types
@@ -72,7 +71,6 @@ typedef enum
     eCSR_AUTH_TYPE_RSN_PSK_SHA256,
     eCSR_AUTH_TYPE_RSN_8021X_SHA256,
 #endif
-    eCSR_AUTH_TYPE_OWE,
     eCSR_NUM_OF_SUPPORT_AUTH_TYPE,
     eCSR_AUTH_TYPE_FAILED = 0xff,
     eCSR_AUTH_TYPE_UNKNOWN = eCSR_AUTH_TYPE_FAILED,
@@ -220,7 +218,6 @@ typedef enum
 #define CSR_SCAN_TIME_DEFAULT       0
 #define CSR_VALUE_IGNORED           0xFFFFFFFF
 #define CSR_RSN_PMKID_SIZE          16
-#define CSR_RSN_MAX_PMK_LEN         48
 #define CSR_MAX_PMKID_ALLOWED       32
 #define CSR_WEP40_KEY_LEN       5
 #define CSR_WEP104_KEY_LEN      13
@@ -299,8 +296,6 @@ typedef struct tagCsrScanRequest
     tANI_U32 restTime;      //in units of milliseconds  //ignored when not connected
     tANI_U32 uIEFieldLen;
     tANI_U8 *pIEField;
-    bool scan_randomize;
-    bool nl_scan;
     eCsrRequestType requestType;    //11d scan or full scan
     tANI_BOOLEAN p2pSearch;
     tANI_BOOLEAN skipDfsChnlInP2pSearch;
@@ -365,10 +360,11 @@ typedef struct tagCsrEseCckmInfo
 #endif
 
 #if defined(FEATURE_WLAN_ESE) && defined(FEATURE_WLAN_ESE_UPLOAD)
+#define CSR_DOT11F_IE_RSN_MAX_LEN   (114)  /*TODO: duplicate one in dot11f.h */
 
 typedef struct tagCsrEseCckmIe
 {
-    tANI_U8 cckmIe[DOT11F_IE_RSN_MAX_LEN];
+    tANI_U8 cckmIe[CSR_DOT11F_IE_RSN_MAX_LEN];
     tANI_U8 cckmIeLen;
 } tCsrEseCckmIe;
 #endif /* FEATURE_WLAN_ESE && FEATURE_WLAN_ESE_UPLOAD */
@@ -409,8 +405,6 @@ typedef struct tagCsrScanResultFilter
 #ifdef WLAN_FEATURE_ROAM_SCAN_OFFLOAD
     tANI_BOOLEAN isPERRoamScan;
 #endif
-    tCsrBssid bssid_hint;
-    bool ignore_pmf_cap;
 }tCsrScanResultFilter;
 
 
@@ -525,10 +519,6 @@ typedef enum
     eCSR_ROAM_UPDATE_MAX_RATE_IND,
     eCSR_ROAM_LOST_LINK_PARAMS_IND,
     eCSR_ROAM_UPDATE_SCAN_RESULT,
-    eCSR_ROAM_ECSA_BCN_TX_IND,
-    eCSR_ROAM_ECSA_CHAN_CHANGE_RSP,
-    eCSR_ROAM_STA_CHANNEL_SWITCH,
-    eCSR_ROAM_SAE_COMPUTE,
 }eRoamCmdStatus;
 
 
@@ -675,6 +665,8 @@ typedef enum
     eCSR_ASSOC_STATE_TYPE_INFRA_DISCONNECTED,
     // Participating in a Infra network and connected to a peer
     eCSR_ASSOC_STATE_TYPE_INFRA_CONNECTED,
+    /* Disconnecting with AP or stop connecting process */
+    eCSR_ASSOC_STATE_TYPE_INFRA_DISCONNECTING,
 
 }eCsrConnectState;
 
@@ -848,11 +840,6 @@ typedef struct tagPmkidCacheInfo
 {
     tCsrBssid BSSID;
     tANI_U8 PMKID[CSR_RSN_PMKID_SIZE];
-    uint8_t pmk[CSR_RSN_MAX_PMK_LEN];
-    uint8_t pmk_len;
-    uint8_t ssid_len;
-    uint8_t ssid[SIR_MAC_MAX_SSID_LENGTH];
-    uint8_t cache_id[CACHE_ID_LEN];
 }tPmkidCacheInfo;
 
 #ifdef FEATURE_WLAN_WAPI
@@ -971,9 +958,7 @@ typedef struct tagCsrRoamProfile
     tCsrMobilityDomainInfo MDID;
 #endif
     tVOS_CON_MODE csrPersona;
-    bool force_24ghz_in_ht20;
-    tCsrBssid bssid_hint;
-    bool force_rsne_override;
+
 }tCsrRoamProfile;
 
 
@@ -1047,7 +1032,6 @@ typedef struct tagCsrNeighborRoamConfigParams
     tANI_U16       nNeighborResultsRefreshPeriod;
     tANI_U16       nEmptyScanRefreshPeriod;
     tANI_U8        nNeighborInitialForcedRoamTo5GhEnable;
-    tANI_U8        nWeakZoneRssiThresholdForRoam;
 }tCsrNeighborRoamConfigParams;
 #endif
 
@@ -1207,18 +1191,12 @@ typedef struct tagCsrConfigParam
     v_BOOL_t isPERRoamEnabled;
     v_BOOL_t isPERRoamCCAEnabled;
     v_S15_t PERRoamFullScanThreshold;
-    v_S15_t PERMinRssiThresholdForRoam;
     v_U32_t rateUpThreshold;
     v_U32_t rateDownThreshold;
     v_U32_t waitPeriodForNextPERScan;
     v_U32_t PERtimerThreshold;
     v_U32_t PERroamTriggerPercent;
 #endif
-
-#ifdef WLAN_FEATURE_LFR_MBB
-    tANI_BOOLEAN enable_lfr_mbb;
-#endif
-
 #endif
 
     tANI_BOOLEAN ignorePeerErpInfo;
@@ -1258,13 +1236,6 @@ typedef struct tagCsrConfigParam
     uint32_t edca_vi_aifs;
     uint32_t edca_bk_aifs;
     uint32_t edca_be_aifs;
-    tANI_BOOLEAN disable_scan_during_sco;
-    uint32_t sta_auth_retries_for_code17;
-    uint32_t sta_sap_scc_on_dfs_chan;
-    tANI_U8 agg_btc_sco_oui[3];
-    tANI_U8 num_ba_buff_btc_sco;
-    tANI_U8 num_ba_buff;
-    bool force_scc_with_ecsa;
 }tCsrConfigParam;
 
 //Tush
@@ -1356,18 +1327,6 @@ typedef struct tagCsrRoamInfo
 #ifdef WLAN_FEATURE_AP_HT40_24G
     tpSirHT2040CoexInfoInd pSmeHT2040CoexInfoInd;
 #endif
-    tDot11fIEHTCaps ht_caps;
-    tDot11fIEVHTCaps vht_caps;
-    tDot11fIEhs20vendor_ie hs20vendor_ie;
-    tDot11fIEVHTOperation vht_operation;
-    tDot11fIEHTInfo ht_operation;
-    bool reassoc;
-    struct sir_channel_chanege_rsp *ap_chan_change_rsp;
-    tSirSmeChanInfo chan_info;
-    tSirMacHTChannelWidth ch_width;
-#ifdef WLAN_FEATURE_SAE
-    struct sir_sae_info *sae_info;
-#endif
 }tCsrRoamInfo;
 
 typedef struct tagCsrFreqScanInfo
@@ -1397,10 +1356,6 @@ typedef struct sSirSmeAssocIndToUpperLayerCnf
     tANI_U8              HT40MHzIntoEnabledSta; //set to true if 40 MHz Intolerant enabled STA
 #endif
     uint32_t             rate_flags;
-    tSirSmeChanInfo      chan_info;
-    tSirMacHTChannelWidth ch_width;
-    tDot11fIEHTCaps HTCaps;
-    tDot11fIEVHTCaps VHTCaps;
 } tSirSmeAssocIndToUpperLayerCnf, *tpSirSmeAssocIndToUpperLayerCnf;
 
 typedef struct tagCsrSummaryStatsInfo
@@ -1596,18 +1551,6 @@ struct tagCsrDelStaParams
     u8 subtype;
 };
 
-
-/**
- * struct csr_set_tx_max_pwr_per_band - Req params to
- * set max tx power per band
- * @band: band for which power to be set
- * @power: power to set in dB
- */
-struct csr_set_tx_max_pwr_per_band {
-    eCsrBand band;
-    tPowerdBm power;
-};
-
 ////////////////////////////////////////////Common SCAN starts
 
 //void *p2 -- the second context pass in for the caller
@@ -1667,12 +1610,6 @@ typedef eHalStatus (*csrRoamSessionCloseCallback)(void *pContext);
 
 ///////////////////////////////////////////Common Roam ends
 
-#ifdef WLAN_FEATURE_SAE
-#define CSR_IS_AUTH_TYPE_SAE(auth_type) \
-   (eCSR_AUTH_TYPE_SAE == auth_type)
-#else
-#define CSR_IS_AUTH_TYPE_SAE(auth_type) (false)
-#endif
 
 /* ---------------------------------------------------------------------------
     \fn csrSetChannels
@@ -1814,12 +1751,6 @@ eHalStatus csrSetBand(tHalHandle hHal, eCsrBand eBand);
 ---------------------------------------------------------------------------*/
 eCsrBand csrGetCurrentBand (tHalHandle hHal);
 
-/**
- * csrConvertCBIniValueToPhyCBState() - convert ini CB value to Phy CB val
- * @cb_ini_value: ini value of cb mode
- *
- * Return: phy CB val
- */
-ePhyChanBondState csrConvertCBIniValueToPhyCBState(v_U32_t cb_ini_val);
+
 #endif
 

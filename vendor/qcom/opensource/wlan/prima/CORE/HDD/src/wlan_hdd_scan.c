@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2019 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2016 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -61,6 +61,9 @@
 #include <palTypes.h>
 #include <aniGlobal.h>
 #include <dot11f.h>
+#ifdef WLAN_BTAMP_FEATURE
+#include "bap_hdd_misc.h"
+#endif
 
 #include <linux/wireless.h>
 #include <net/cfg80211.h>
@@ -211,7 +214,6 @@ static eHalStatus hdd_IndicateScanResult(hdd_scan_info_t *scanInfo, tCsrScanResu
    int error;
    char custom[MAX_CUSTOM_LEN];
    char *p;
-   tANI_U32 status;
 
    hddLog( LOG1, "hdd_IndicateScanResult " MAC_ADDRESS_STR,
           MAC_ADDR_ARRAY(descriptor->bssId));
@@ -340,15 +342,8 @@ static eHalStatus hdd_IndicateScanResult(hdd_scan_info_t *scanInfo, tCsrScanResu
 
        pDot11IEHTCaps = NULL;
 
-       status = dot11fUnpackBeaconIEs ((tpAniSirGlobal)
+       dot11fUnpackBeaconIEs ((tpAniSirGlobal)
            hHal, (tANI_U8 *) descriptor->ieFields, ie_length,  &dot11BeaconIEs);
-       if (DOT11F_FAILED(status))
-       {
-           hddLog(LOGE,
-                  FL("unpack failed for Beacon IE status:(0x%08x)"),
-                  status);
-           return -EINVAL;
-       }
 
        pDot11SSID = &dot11BeaconIEs.SSID;
 
@@ -579,7 +574,7 @@ void __hdd_processSpoofMacAddrRequest(struct work_struct *work)
         hddLog(LOG1, FL("Processing Spoof request now"));
         /* Inform SME about spoof mac addr request*/
         if ( eHAL_STATUS_SUCCESS != sme_SpoofMacAddrReq(pHddCtx->hHal,
-                &pHddCtx->spoofMacAddr.randomMacAddr, true))
+                &pHddCtx->spoofMacAddr.randomMacAddr))
         {
             hddLog(LOGE, FL("Sending Spoof request failed - Disable spoofing"));
             pHddCtx->spoofMacAddr.isEnabled = FALSE;
@@ -631,7 +626,7 @@ static eHalStatus hdd_ScanRequestCallback(tHalHandle halHandle, void *pContext,
     
     ENTER();
 
-    hddLog(LOGW,"%s called with halHandle = %pK, pContext = %pK, scanID = %d,"
+    hddLog(LOGW,"%s called with halHandle = %p, pContext = %p, scanID = %d,"
            " returned status = %d", __func__, halHandle, pContext,
            (int) scanId, (int) status);
 
@@ -641,7 +636,7 @@ static eHalStatus hdd_ScanRequestCallback(tHalHandle halHandle, void *pContext,
        do some quick sanity before proceeding */
     if (pAdapter->dev != dev)
     {
-       hddLog(LOGW, "%s: device mismatch %pK vs %pK",
+       hddLog(LOGW, "%s: device mismatch %p vs %p",
                __func__, pAdapter->dev, dev);
         return eHAL_STATUS_SUCCESS;
     }
@@ -723,6 +718,14 @@ int __iw_set_scan(struct net_device *dev, struct iw_request_info *info,
                  "%s: pwextBuf is NULL",__func__);
        return -EINVAL;
    }
+#ifdef WLAN_BTAMP_FEATURE
+   //Scan not supported when AMP traffic is on.
+   if( VOS_TRUE == WLANBAP_AmpSessionOn() ) 
+   {
+       VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR, "%s: No scanning when AMP is on",__func__);
+       return eHAL_STATUS_SUCCESS;
+   }
+#endif
    if(pHddCtx->scan_info.mScanPending == TRUE)
    {
        VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_FATAL, "%s:mScanPending is TRUE !!!",__func__);
@@ -1011,7 +1014,7 @@ static eHalStatus hdd_CscanRequestCallback(tHalHandle halHandle, void *pContext,
     VOS_STATUS vos_status = VOS_STATUS_SUCCESS;
     ENTER();
 
-    hddLog(LOG1,"%s called with halHandle = %pK, pContext = %pK, scanID = %d,"
+    hddLog(LOG1,"%s called with halHandle = %p, pContext = %p, scanID = %d,"
            " returned status = %d", __func__, halHandle, pContext,
             (int) scanId, (int) status);
 
@@ -1060,6 +1063,15 @@ int iw_set_cscan(struct net_device *dev, struct iw_request_info *info,
 
     ENTER();
     VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO, "%s: enter !!!",__func__);
+
+#ifdef WLAN_BTAMP_FEATURE
+    //Scan not supported when AMP traffic is on.
+    if( VOS_TRUE == WLANBAP_AmpSessionOn() )
+    {
+        VOS_TRACE(VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR, "%s: No scanning when AMP is on",__func__);
+        return eHAL_STATUS_SUCCESS;
+    }
+#endif
 
     if ((WLAN_HDD_GET_CTX(pAdapter))->isLogpInProgress)
     {

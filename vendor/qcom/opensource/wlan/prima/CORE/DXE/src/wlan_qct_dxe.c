@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2016 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -64,7 +64,6 @@ when           who        what, where, why
 #include "wlan_qct_dxe.h"
 #include "wlan_qct_dxe_i.h"
 #include "wlan_qct_pal_device.h"
-#include "vos_api.h"
 
 /*----------------------------------------------------------------------------
  * Local Definitions
@@ -956,7 +955,7 @@ static wpt_status dxeDescAllocAndLink
       }
       memset((wpt_uint8 *)currentDesc, 0, sizeof(WLANDXE_DescType));
       HDXE_MSG(eWLAN_MODULE_DAL_DATA, eWLAN_PAL_TRACE_LEVEL_INFO_LOW,
-               "Allocated Descriptor VA %pK, PA %pK", currentDesc, physAddressAlloc);
+               "Allocated Descriptor VA %p, PA %p", currentDesc, physAddressAlloc);
 
       currentCtrlBlk->linkedDesc        = currentDesc;
       currentCtrlBlk->linkedDescPhyAddr = physAddress;
@@ -1715,7 +1714,7 @@ void dxeRXResourceAvailableTimerExpHandler
       if (NULL != dxeCtxt)
          dxeCtxt->driverReloadInProcessing = eWLAN_PAL_TRUE;
 
-      wpalWlanReload(VOS_DXE_FAILURE);
+      wpalWlanReload();
 
       if (NULL != usrData)
          dxeStartSSRTimer((WLANDXE_CtrlBlkType *)usrData);
@@ -2415,7 +2414,7 @@ static wpt_status dxeRXFrameReady
             HDXE_MSG(eWLAN_MODULE_DAL_DATA, eWLAN_PAL_TRACE_LEVEL_ERROR,
                      "RX successive empty interrupt, Could not find invalidated DESC reload driver");
             dxeCtxt->driverReloadInProcessing = eWLAN_PAL_TRUE;
-            wpalWlanReload(VOS_DXE_FAILURE);
+            wpalWlanReload();
             dxeStartSSRTimer(dxeCtxt);
          }
       }
@@ -2744,7 +2743,7 @@ pull_frames:
          if (eWLAN_PAL_STATUS_SUCCESS != dxeErrHandler(channelCb, chHighStat))
          {
             dxeCtxt->driverReloadInProcessing = eWLAN_PAL_TRUE;
-            wpalWlanReload(VOS_DXE_FAILURE);
+            wpalWlanReload();
             dxeStartSSRTimer(dxeCtxt);
          }
       }
@@ -2799,7 +2798,7 @@ pull_frames:
                          dxeErrHandler(channelCb, chLowStat))
          {
             dxeCtxt->driverReloadInProcessing = eWLAN_PAL_TRUE;
-            wpalWlanReload(VOS_DXE_FAILURE);
+            wpalWlanReload();
             dxeStartSSRTimer(dxeCtxt);
          }
       }
@@ -2851,7 +2850,7 @@ pull_frames:
                             dxeErrHandler(channelCb, chLogRxStat))
             {
                dxeCtxt->driverReloadInProcessing = eWLAN_PAL_TRUE;
-               wpalWlanReload(VOS_DXE_FAILURE);
+               wpalWlanReload();
                dxeStartSSRTimer(dxeCtxt);
             }
 
@@ -2905,7 +2904,7 @@ pull_frames:
                             dxeErrHandler(channelCb, chLogRxFwStat))
             {
                dxeCtxt->driverReloadInProcessing = eWLAN_PAL_TRUE;
-               wpalWlanReload(VOS_DXE_FAILURE);
+               wpalWlanReload();
                dxeStartSSRTimer(dxeCtxt);
             }
 
@@ -3214,16 +3213,8 @@ static void dxeRXISR
       return;         
    }
 
-   status = wpalReadRegister(WLANDXE_INT_SRC_RAW_ADDRESS,
+   wpalReadRegister(WLANDXE_INT_SRC_RAW_ADDRESS,
                                   &intSrc);
-   if(eWLAN_PAL_STATUS_SUCCESS != status)
-   {
-      status = wpalEnableInterrupt(DXE_INTERRUPT_RX_READY);
-      if(eWLAN_PAL_STATUS_SUCCESS != status)
-          HDXE_MSG(eWLAN_MODULE_DAL_DATA, eWLAN_PAL_TRACE_LEVEL_ERROR,
-                   "dxeISR enable rx ready interrupt fail");
-      return;
-   }
    /* Note: intSrc which holds the INT_SRC_RAW_ADDRESS reg value
       While debugging crash dump convert to power of 2 for channel type */
    DXTRACE(dxeTrace(intSrc, TRACE_RXINT_STATE, TRACE_WLANDXE_VAR_DISABLE));
@@ -3452,12 +3443,6 @@ static wpt_status dxeTXPushFrame
       if(channelEntry->extraConfig.cw_ctrl_write_valid != firstDesc->descCtrl.ctrl)
       {
          //HDXE_ASSERT(0);
-      }
-
-      if(wpalIsArpPkt(palPacket))
-      {
-         HDXE_MSG(eWLAN_MODULE_DAL_DATA, eWLAN_PAL_TRACE_LEVEL_INFO_HIGH,
-                  "%s :ARP packet", __func__);
       }
 
       /* Everything is ready
@@ -3710,14 +3695,6 @@ static wpt_status dxeTXCompFrame
             }
             return status;
          }
-
-         if(wpalIsArpPkt(currentCtrlBlk->xfrFrame))
-         {
-             HDXE_MSG(eWLAN_MODULE_DAL_DATA, eWLAN_PAL_TRACE_LEVEL_INFO_HIGH,
-                      "%s :ARP packet DMA-ed ", __func__);
-             wpalUpdateTXArpFWdeliveredStats();
-         }
-
          hostCtxt->txCompCB(hostCtxt->clientCtxt,
                             currentCtrlBlk->xfrFrame,
                             eWLAN_PAL_STATUS_SUCCESS);
@@ -4111,7 +4088,7 @@ void dxeTXEventHandler
                          dxeErrHandler(channelCb, chStat))
          {
             dxeCtxt->driverReloadInProcessing = eWLAN_PAL_TRUE;
-            wpalWlanReload(VOS_DXE_FAILURE);
+            wpalWlanReload();
             dxeStartSSRTimer(dxeCtxt);
          }
          bEnableISR = 1;
@@ -4168,7 +4145,7 @@ void dxeTXEventHandler
                          dxeErrHandler(channelCb, chStat))
          {
              dxeCtxt->driverReloadInProcessing = eWLAN_PAL_TRUE;
-             wpalWlanReload(VOS_DXE_FAILURE);
+             wpalWlanReload();
              dxeStartSSRTimer(dxeCtxt);
          }
          bEnableISR = 1;
