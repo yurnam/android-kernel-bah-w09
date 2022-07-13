@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2016 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2017, 2019 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -56,6 +56,11 @@
 #define LIM_JOIN_PROBE_REQ_TIMER_MS              200
 #define LIM_AUTH_RETRY_TIMER_MS              60
 
+/*
+ * SAE auth timer of 5secs. This is required for duration of entire SAE
+ * authentication.
+ */
+#define LIM_AUTH_SAE_TIMER_MS 5000
 
 //default beacon interval value used in HB timer interval calculation
 #define LIM_HB_TIMER_BEACON_INTERVAL             100
@@ -63,6 +68,10 @@
 /* This timer is a periodic timer which expires at every 1 sec to
    convert  ACTIVE DFS channel to DFS channels */
 #define ACTIVE_TO_PASSIVE_CONVERISON_TIMEOUT     1000
+
+#ifdef WLAN_FEATURE_LFR_MBB
+#define PREAUTH_REASSOC_TIMEOUT     500
+#endif
 
 /**
  * limCreateTimers()
@@ -427,6 +436,18 @@ limCreateTimers(tpAniSirGlobal pMac)
             goto err_timer;
         }
 
+       /*
+        * SAE auth timer of 5secs. This is required for duration of entire SAE
+        * authentication.
+        */
+       if ((tx_timer_create(&pMac->lim.limTimers.sae_auth_timer,
+             "SAE AUTH Timer", limTimerHandler, SIR_LIM_AUTH_SAE_TIMEOUT,
+             SYS_MS_TO_TICKS(LIM_AUTH_SAE_TIMER_MS), 0, TX_NO_ACTIVATE)) !=
+             TX_SUCCESS) {
+           limLog(pMac, LOGP, FL("could not create SAE AUTH Timer"));
+           goto err_timer;
+       }
+
         if (wlan_cfgGetInt(pMac, WNI_CFG_BACKGROUND_SCAN_PERIOD,
                       &cfgValue) != eSIR_SUCCESS)
         {
@@ -624,6 +645,34 @@ limCreateTimers(tpAniSirGlobal pMac)
     }
 #endif
 
+#ifdef WLAN_FEATURE_LFR_MBB
+    cfgValue = PREAUTH_REASSOC_TIMEOUT;
+    cfgValue = SYS_MS_TO_TICKS(cfgValue);
+
+    if (tx_timer_create(&pMac->lim.limTimers.glim_pre_auth_mbb_rsp_timer,
+                        "PREAUTH MBB RSP TIMEOUT",
+                        limTimerHandler, SIR_LIM_PREAUTH_MBB_RSP_TIMEOUT,
+                        cfgValue, 0,
+                        TX_NO_ACTIVATE) != TX_SUCCESS)
+    {
+        limLog(pMac, LOGP, FL("could not create PREAUTH_MBB_RSP timer"));
+        goto err_timer;
+    }
+
+    cfgValue = PREAUTH_REASSOC_TIMEOUT;
+    cfgValue = SYS_MS_TO_TICKS(cfgValue);
+
+    if (tx_timer_create(&pMac->lim.limTimers.glim_reassoc_mbb_rsp_timer,
+                        "REASSOC MBB RSP TIMEOUT",
+                        limTimerHandler, SIR_LIM_REASSOC_MBB_RSP_TIMEOUT,
+                        cfgValue, 0,
+                        TX_NO_ACTIVATE) != TX_SUCCESS)
+    {
+        limLog(pMac, LOGP, FL("could not create REASSOC_MBB_RSP timer"));
+        goto err_timer;
+    }
+#endif
+
 #if defined(FEATURE_WLAN_ESE) && !defined(FEATURE_WLAN_ESE_UPLOAD)
     cfgValue = 5000;
     cfgValue = SYS_MS_TO_TICKS(cfgValue);
@@ -702,6 +751,17 @@ limCreateTimers(tpAniSirGlobal pMac)
         limLog(pMac, LOG1,
                FL("gLimActiveToPassiveChannelTimer not created %d"), cfgValue);
     }
+    cfgValue = WNI_CFG_BEACON_INTERVAL_STADEF;
+    cfgValue = SYS_MS_TO_TICKS(cfgValue);
+    if (tx_timer_create(&pMac->lim.limTimers.g_lim_ap_ecsa_timer,
+                        "AP ECSA TIMER", limTimerHandler,
+                        SIR_LIM_SAP_ECSA_TIMEOUT,
+                        cfgValue, 0,
+                        TX_NO_ACTIVATE) != TX_SUCCESS)
+    {
+        limLog(pMac, LOGW,FL("could not create timer for passive channel to active channel"));
+        goto err_timer;
+    }
 
     return TX_SUCCESS;
 
@@ -712,6 +772,10 @@ limCreateTimers(tpAniSirGlobal pMac)
         tx_timer_delete(&pMac->lim.limTimers.gLimEseTsmTimer);
 #endif /* FEATURE_WLAN_ESE && !FEATURE_WLAN_ESE_UPLOAD */
         tx_timer_delete(&pMac->lim.limTimers.gLimFTPreAuthRspTimer);
+#ifdef WLAN_FEATURE_LFR_MBB
+        tx_timer_delete(&pMac->lim.limTimers.glim_pre_auth_mbb_rsp_timer);
+        tx_timer_delete(&pMac->lim.limTimers.glim_reassoc_mbb_rsp_timer);
+#endif
         tx_timer_delete(&pMac->lim.limTimers.gLimUpdateOlbcCacheTimer);
         while(((tANI_S32)--i) >= 0)
         {
@@ -736,6 +800,8 @@ limCreateTimers(tpAniSirGlobal pMac)
         tx_timer_delete(&pMac->lim.limTimers.gLimMinChannelTimer);
         tx_timer_delete(&pMac->lim.limTimers.gLimP2pSingleShotNoaInsertTimer);
         tx_timer_delete(&pMac->lim.limTimers.gLimActiveToPassiveChannelTimer);
+        tx_timer_delete(&pMac->lim.limTimers.g_lim_ap_ecsa_timer);
+        tx_timer_delete(&pMac->lim.limTimers.sae_auth_timer);
 
         if(NULL != pMac->lim.gLimPreAuthTimerTable.pTable)
         {
@@ -1730,6 +1796,30 @@ limDeactivateAndChangeTimer(tpAniSirGlobal pMac, tANI_U32 timerId)
             }
             break;
 #endif
+
+#ifdef WLAN_FEATURE_LFR_MBB
+        case eLIM_PREAUTH_MBB_RSP_TIMER:
+            MTRACE(macTrace(pMac, TRACE_CODE_TIMER_DEACTIVATE,
+                                  NO_SESSION, eLIM_PREAUTH_MBB_RSP_TIMER));
+            if (tx_timer_deactivate(&pMac->lim.limTimers.
+                          glim_pre_auth_mbb_rsp_timer) != TX_SUCCESS) {
+                limLog(pMac, LOGP,
+                       FL("Unable to deactivate preauth response mbb timer"));
+                return;
+            }
+            break;
+        case eLIM_REASSOC_MBB_RSP_TIMER:
+            MTRACE(macTrace(pMac, TRACE_CODE_TIMER_DEACTIVATE,
+                                  NO_SESSION, eLIM_REASSOC_MBB_RSP_TIMER));
+            if (tx_timer_deactivate(&pMac->lim.limTimers.
+                          glim_reassoc_mbb_rsp_timer) != TX_SUCCESS) {
+                limLog(pMac, LOGP,
+                       FL("Unable to deactivate reassoc response mbb timer"));
+                return;
+            }
+            break;
+#endif
+
 #if defined(FEATURE_WLAN_ESE) && !defined(FEATURE_WLAN_ESE_UPLOAD)
          case eLIM_TSM_TIMER:
              if (tx_timer_deactivate(&pMac->lim.limTimers.gLimEseTsmTimer)
@@ -1836,8 +1926,50 @@ limDeactivateAndChangeTimer(tpAniSirGlobal pMac, tANI_U32 timerId)
             return;
         }
         break;
-
-        default:
+    case eLIM_AP_ECSA_TIMER:
+        if (tx_timer_deactivate(
+                       &pMac->lim.limTimers.g_lim_ap_ecsa_timer) != TX_SUCCESS)
+        {
+           /*
+            * Could not deactivate SingleShot NOA Insert
+            * timer. Log error.
+            */
+            limLog(pMac, LOGE, FL("Unable to deactivate AP ecsa timer"));
+            return;
+        }
+        if ((psessionEntry = peFindSessionBySessionId(pMac,
+                pMac->lim.limTimers.g_lim_ap_ecsa_timer.sessionId)) == NULL)
+        {
+            limLog(pMac, LOGE,
+                   FL("session does not exist for given SessionId : %d, for AP ecsa timer"),
+                   pMac->lim.limTimers.g_lim_ap_ecsa_timer.sessionId);
+            break;
+        }
+        val = psessionEntry->beaconParams.beaconInterval;
+        val = SYS_MS_TO_TICKS(val);
+        if (tx_timer_change(&pMac->lim.limTimers.g_lim_ap_ecsa_timer,
+                                val, 0) != TX_SUCCESS)
+        {
+                limLog(pMac, LOGE, FL("Unable to change g_lim_ap_ecsa_timer timer"));
+        }
+        break;
+#ifdef WLAN_FEATURE_SAE
+    case eLIM_AUTH_SAE_TIMER:
+        if (tx_timer_deactivate(&pMac->lim.limTimers.sae_auth_timer)
+            != TX_SUCCESS) {
+            limLog(pMac, LOGP, FL("Unable to deactivate SAE auth timer"));
+            return;
+        }
+        /* Change timer to reactivate it in future */
+        val = SYS_MS_TO_TICKS(LIM_AUTH_SAE_TIMER_MS);
+        if (tx_timer_change(&pMac->lim.limTimers.sae_auth_timer,
+            val, 0) != TX_SUCCESS) {
+            limLog(pMac, LOGP, FL("unable to change SAE auth timer"));
+            return;
+        }
+        break;
+#endif
+     default:
             // Invalid timerId. Log error
             break;
     }

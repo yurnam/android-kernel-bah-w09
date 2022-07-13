@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2016 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2017 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -297,7 +297,6 @@ VOS_STATUS vos_watchdog_open
   }
   vos_mem_zero(pWdContext, sizeof(VosWatchdogContext));
   pWdContext->pVContext = pVosContext;
-  gpVosWatchdogContext = pWdContext;
 
   //Initialize the helper events and event queues
   init_completion(&pWdContext->WdStartEvent);
@@ -320,6 +319,7 @@ VOS_STATUS vos_watchdog_open
   }  
   else
   {
+     gpVosWatchdogContext = pWdContext;
      wake_up_process(pWdContext->WdThread);
   }
  /*
@@ -971,8 +971,6 @@ VosWDThread
         else
         {
           pWdContext->isFatalError = false;
-          pHddCtx->isLogpInProgress = FALSE;
-          vos_set_logp_in_progress(VOS_MODULE_ID_VOSS, FALSE);
         }
         atomic_set(&pHddCtx->isRestartInProgress, 0);
         pWdContext->resetInProgress = false;
@@ -2205,4 +2203,34 @@ void vos_dump_stack(uint8_t thread_id)
           VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
                     "%s: Invalid thread %d invoked",__func__, thread_id);
    }
+}
+
+void vos_dump_thread_stacks(int threadId)
+{
+   /* Make sure that Vos Watchdog context has been initialized */
+   if (gpVosWatchdogContext == NULL)
+   {
+      VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
+          "%s: gpVosWatchdogContext == NULL", __func__);
+      return;
+   }
+     hddLog(LOGE, FL("Thread Stuck count reached threshold!!!"
+              "MC Count %d RX count %d TX count %d"),
+              gpVosWatchdogContext->mcThreadStuckCount,
+              gpVosWatchdogContext->rxThreadStuckCount,
+              gpVosWatchdogContext->txThreadStuckCount);
+
+   vos_dump_stack(MC_Thread);
+   vos_dump_stack(TX_Thread);
+   vos_dump_stack(RX_Thread);
+}
+
+int vos_get_gfp_flags(void)
+{
+   int flags = GFP_KERNEL;
+
+   if (in_interrupt() || in_atomic() || irqs_disabled())
+      flags = GFP_ATOMIC;
+
+   return flags;
 }

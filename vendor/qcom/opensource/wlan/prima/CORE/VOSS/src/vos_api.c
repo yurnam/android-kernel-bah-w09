@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2017 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2018 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -78,12 +78,7 @@
 #include "vos_utils.h"
 #include <wlan_logging_sock_svc.h>
 
-#ifdef WLAN_BTAMP_FEATURE
-#include "bapApi.h"
-#include "bapInternal.h"
-#include "bap_hdd_main.h"
-#endif //WLAN_BTAMP_FEATURE
-
+#include "wlan_qct_wdi_cts.h"
 
 /*---------------------------------------------------------------------------
  * Preprocessor Definitions and Constants
@@ -100,12 +95,28 @@
 /* Approximate amount of time to wait for WDA to issue a DUMP req */
 #define VOS_WDA_RESP_TIMEOUT WDA_STOP_TIMEOUT
 
+/* Trace index for WDI Read/Write */
+#define VOS_TRACE_INDEX_MAX 256
+
+/* ARP Target IP offset */
+#define VOS_ARP_TARGET_IP_OFFSET 58
+
 /*---------------------------------------------------------------------------
  * Data definitions
  * ------------------------------------------------------------------------*/
 static VosContextType  gVosContext;
 static pVosContextType gpVosContext;
 static v_U8_t vos_multicast_logging;
+
+struct vos_wdi_trace
+{
+   vos_wdi_trace_event_type event;
+   uint16        message;
+   uint64        time;
+};
+
+static struct vos_wdi_trace gvos_wdi_msg_trace[VOS_TRACE_INDEX_MAX];
+uint16 gvos_wdi_msg_trace_index = 0;
 
 /*---------------------------------------------------------------------------
  * Forward declaration
@@ -900,6 +911,12 @@ VOS_STATUS vos_start( v_CONTEXT_t vosContext )
      if ( vStatus == VOS_STATUS_E_TIMEOUT )
      {
          WDA_setNeedShutdown(vosContext);
+         vos_smd_dump_stats();
+         vos_dump_wdi_events();
+         VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
+               "%s: Test MC thread by posting a probe message to SYS",
+                __func__);
+         wlan_sys_probe();
      }
      VOS_ASSERT(0);
      return VOS_STATUS_E_FAILURE;
@@ -1085,17 +1102,6 @@ VOS_STATUS vos_close( v_CONTEXT_t vosContext )
 {
   VOS_STATUS vosStatus;
 
-#ifdef WLAN_BTAMP_FEATURE
-  vosStatus = WLANBAP_Close(vosContext);
-  if (!VOS_IS_STATUS_SUCCESS(vosStatus))
-  {
-     VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
-         "%s: Failed to close BAP", __func__);
-     VOS_ASSERT( VOS_IS_STATUS_SUCCESS( vosStatus ) );
-  }
-#endif // WLAN_BTAMP_FEATURE
-
-
   vosStatus = WLANTL_Close(vosContext);
   if (!VOS_IS_STATUS_SUCCESS(vosStatus))
   {
@@ -1260,14 +1266,6 @@ v_VOID_t* vos_get_context( VOS_MODULE_ID moduleId,
       pModContext = gpVosContext->pTLContext;
       break;
     }
-
-#ifdef WLAN_BTAMP_FEATURE
-    case VOS_MODULE_ID_BAP:
-    {
-        pModContext = gpVosContext->pBAPContext;
-        break;
-    }    
-#endif //WLAN_BTAMP_FEATURE
 
     case VOS_MODULE_ID_SAP:
     {
@@ -1499,14 +1497,6 @@ VOS_STATUS vos_alloc_context( v_VOID_t *pVosContext, VOS_MODULE_ID moduleID,
       break;
     }
 
-#ifdef WLAN_BTAMP_FEATURE
-    case VOS_MODULE_ID_BAP:
-    {
-        pGpModContext = &(gpVosContext->pBAPContext);
-        break;
-    }    
-#endif //WLAN_BTAMP_FEATURE
-
     case VOS_MODULE_ID_SAP:
     {
       pGpModContext = &(gpVosContext->pSAPContext);
@@ -1623,14 +1613,6 @@ VOS_STATUS vos_free_context( v_VOID_t *pVosContext, VOS_MODULE_ID moduleID,
       pGpModContext = &(gpVosContext->pTLContext); 
       break;
     }
-
-#ifdef WLAN_BTAMP_FEATURE
-    case VOS_MODULE_ID_BAP:
-    {
-        pGpModContext = &(gpVosContext->pBAPContext);
-        break;
-    }
-#endif //WLAN_BTAMP_FEATURE
  
     case VOS_MODULE_ID_SAP:
     {
@@ -1748,11 +1730,12 @@ void vos_send_fatal_event_done(void)
      */
     if ((WLAN_LOG_INDICATOR_HOST_DRIVER == indicator) &&
         (WLAN_LOG_REASON_SME_COMMAND_STUCK == reason_code ||
-         WLAN_LOG_REASON_SME_OUT_OF_CMD_BUF == reason_code))
+         WLAN_LOG_REASON_SME_OUT_OF_CMD_BUF == reason_code ||
+         WLAN_LOG_REASON_SCAN_NOT_ALLOWED == reason_code))
     {
          VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
            "Do SSR for reason_code=%d", reason_code);
-         vos_wlanRestart();
+         vos_wlanRestart(VOS_GET_MSG_BUFF_FAILURE);
     }
 }
 
@@ -1828,7 +1811,7 @@ VOS_STATUS __vos_fatal_event_logs_req( uint32_t is_fatal,
         return VOS_STATUS_E_FAILURE;
     }
 
-    if(!pHddCtx->cfg_ini->enableFatalEvent)
+    if (!pHddCtx->cfg_ini->enableFatalEvent || !pHddCtx->is_fatal_event_log_sup)
     {
        VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_INFO,
             "%s: Fatal event not enabled", __func__);
@@ -2648,6 +2631,7 @@ vos_fetch_tl_cfg_parms
   pTLConfig->ucReorderAgingTime[3] = pConfig->VoReorderAgingTime;/*WLANTL_AC_VO*/
   pTLConfig->uDelayedTriggerFrmInt = pConfig->DelayedTriggerFrmInt;
   pTLConfig->uMinFramesProcThres = pConfig->MinFramesProcThres;
+  pTLConfig->ucIsReplayCheck = pConfig->enablePNReplay;
 
 }
 
@@ -2677,16 +2661,6 @@ v_BOOL_t vos_is_apps_power_collapse_allowed(void* pHddCtx)
 VOS_STATUS vos_shutdown(v_CONTEXT_t vosContext)
 {
   VOS_STATUS vosStatus;
-
-#ifdef WLAN_BTAMP_FEATURE
-  vosStatus = WLANBAP_Close(vosContext);
-  if (!VOS_IS_STATUS_SUCCESS(vosStatus))
-  {
-     VOS_TRACE( VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
-         "%s: Failed to close BAP", __func__);
-     VOS_ASSERT( VOS_IS_STATUS_SUCCESS( vosStatus ) );
-  }
-#endif // WLAN_BTAMP_FEATURE
 
   vosStatus = WLANTL_Close(vosContext);
   if (!VOS_IS_STATUS_SUCCESS(vosStatus))
@@ -2841,7 +2815,7 @@ VOS_STATUS vos_wlanReInit(void)
   The function wlan_hdd_restart_driver protects against re-entrant calls.
 
   @param
-       NONE
+       reason: recovery reason
   @return
        VOS_STATUS_SUCCESS   - Operation completed successfully.
        VOS_STATUS_E_FAILURE - Operation failed.
@@ -2850,11 +2824,11 @@ VOS_STATUS vos_wlanReInit(void)
 
 
 */
-VOS_STATUS vos_wlanRestart(void)
+VOS_STATUS vos_wlanRestart(enum vos_hang_reason reason)
 {
    VOS_STATUS vstatus;
    hdd_context_t *pHddCtx = NULL;
-   v_CONTEXT_t pVosContext        = NULL;
+   VosContextType  *pVosContext        = NULL;
 
    /* Check whether driver load unload is in progress */
    if(vos_is_load_unload_in_progress( VOS_MODULE_ID_VOSS, NULL)) 
@@ -2871,7 +2845,8 @@ VOS_STATUS vos_wlanRestart(void)
                "%s: Global VOS context is Null", __func__);
       return VOS_STATUS_E_FAILURE;
    }
-    
+   pVosContext->recovery_reason = reason;
+
    /* Get the HDD context */
    pHddCtx = (hdd_context_t *)vos_get_context(VOS_MODULE_ID_HDD, pVosContext );
    if(!pHddCtx) {
@@ -2883,6 +2858,45 @@ VOS_STATUS vos_wlanRestart(void)
    /* Reload the driver */
    vstatus = wlan_hdd_restart_driver(pHddCtx);
    return vstatus;
+}
+
+/**
+ * vos_get_recovery_reason() - get self recovery reason
+ * @reason: recovery reason
+ *
+ * Return: None
+ */
+void vos_get_recovery_reason(enum vos_hang_reason *reason)
+{
+	VosContextType *pVosContext = NULL;
+
+	pVosContext = vos_get_global_context(VOS_MODULE_ID_VOSS, NULL);
+	if(!pVosContext) {
+		VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_FATAL,
+		     "%s: Global VOS context is Null", __func__);
+		return;
+	}
+
+	*reason = pVosContext->recovery_reason;
+}
+
+/**
+ * vos_reset_recovery_reason() - reset the reason to unspecified
+ *
+ * Return: None
+ */
+void vos_reset_recovery_reason(void)
+{
+	VosContextType *pVosContext = NULL;
+
+	pVosContext = vos_get_global_context(VOS_MODULE_ID_VOSS, NULL);
+	if(!pVosContext) {
+		VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_FATAL,
+		     "%s: Global VOS context is Null", __func__);
+		return;
+	}
+
+	pVosContext->recovery_reason = VOS_REASON_UNSPECIFIED;
 }
 
 
@@ -3267,6 +3281,59 @@ void vos_set_rx_wow_dump(bool value)
 }
 
 /**
+ * vos_set_hdd_bad_sta() - Set bad link peer sta id
+ * @sta_id: sta id of the bad peer
+ *
+ * Return none.
+ */
+void vos_set_hdd_bad_sta(uint8_t sta_id)
+{
+    hdd_context_t *pHddCtx = NULL;
+    v_CONTEXT_t pVosContext = vos_get_global_context(VOS_MODULE_ID_SYS, NULL);
+
+    if(!pVosContext)
+    {
+       hddLog(VOS_TRACE_LEVEL_FATAL,"%s: Global VOS context is Null", __func__);
+       return;
+    }
+
+    pHddCtx = (hdd_context_t *)vos_get_context(VOS_MODULE_ID_HDD, pVosContext );
+    if(!pHddCtx) {
+       VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_FATAL,
+                "%s: HDD context is Null", __func__);
+       return;
+    }
+
+    pHddCtx->bad_sta[sta_id] = 1;
+}
+
+/**
+ * vos_reset_hdd_bad_sta() - Reset the bad peer sta_id
+ * @sta_id: sta id of the peer
+ *
+ * Return none.
+ */
+void vos_reset_hdd_bad_sta(uint8_t sta_id)
+{
+    hdd_context_t *pHddCtx = NULL;
+    v_CONTEXT_t pVosContext = vos_get_global_context(VOS_MODULE_ID_SYS, NULL);
+
+    if(!pVosContext) {
+       hddLog(VOS_TRACE_LEVEL_FATAL,"%s: Global VOS context is Null", __func__);
+       return;
+    }
+
+    pHddCtx = (hdd_context_t *)vos_get_context(VOS_MODULE_ID_HDD, pVosContext );
+    if(!pHddCtx) {
+       VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_FATAL,
+                "%s: HDD context is Null", __func__);
+       return;
+    }
+
+    pHddCtx->bad_sta[sta_id] = 0;
+}
+
+/**
  * vos_probe_threads() - VOS API to post messages
  * to all the threads to detect if they are active or not
  *
@@ -3472,6 +3539,7 @@ rateidx_to_rate_bw_preamble_sgi   rateidx_to_rate_bw_preamble_sgi_table[] =
 { 4333, PREAMBLE_VHT, S_BW80, 1},
 };
 
+#ifdef FEATURE_WLAN_DIAG_SUPPORT
 void get_rate_and_MCS(per_packet_stats *stats, uint32 rateindex)
 {
     rateidx_to_rate_bw_preamble_sgi *ratetbl;
@@ -3538,6 +3606,17 @@ void get_rate_and_MCS(per_packet_stats *stats, uint32 rateindex)
     stats->MCS.preamble = ratetbl->preamble;
     stats->MCS.bw = ratetbl->bw;
     stats->MCS.short_gi = ratetbl->short_gi;
+}
+#endif
+
+v_U16_t vos_get_rate_from_rateidx(uint32 rateindex)
+{
+	v_U16_t rate = 0;
+
+	if (rateindex < STATS_MAX_RATE_INDEX)
+		rate = rateidx_to_rate_bw_preamble_sgi_table[rateindex].rate;
+
+	return rate;
 }
 
 bool vos_isPktStatsEnabled(void)
@@ -3651,3 +3730,182 @@ void vos_set_snoc_high_freq_voting(bool enable)
    return;
 }
 #endif
+
+void vos_smd_dump_stats(void)
+{
+  WCTS_Dump_Smd_status();
+}
+
+void vos_log_wdi_event(uint16 msg, vos_wdi_trace_event_type event)
+{
+
+   if (gvos_wdi_msg_trace_index >= VOS_TRACE_INDEX_MAX)
+   {
+          gvos_wdi_msg_trace_index = 0;
+   }
+
+   gvos_wdi_msg_trace[gvos_wdi_msg_trace_index].event = event;
+   gvos_wdi_msg_trace[gvos_wdi_msg_trace_index].time =
+                                 vos_get_monotonic_boottime();
+   gvos_wdi_msg_trace[gvos_wdi_msg_trace_index].message =  msg;
+   gvos_wdi_msg_trace_index++;
+
+   return;
+}
+
+void vos_dump_wdi_events(void)
+{
+   int i;
+
+   for(i = 0; i < VOS_TRACE_INDEX_MAX; i++) {
+            VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_ERROR,
+            "%s:event:%d time:%lld msg:%d ",__func__,
+            gvos_wdi_msg_trace[i].event,
+            gvos_wdi_msg_trace[i].time,
+            gvos_wdi_msg_trace[i].message);
+  }
+}
+
+/**
+ * vos_check_arp_target_ip() - check if the Target IP is gateway IP
+ * @pPacket: pointer to vos packet
+ *
+ * Return: true if the IP is of gateway or false otherwise
+ */
+bool vos_check_arp_target_ip(vos_pkt_t *pPacket)
+{
+   v_CONTEXT_t pVosContext = vos_get_global_context(VOS_MODULE_ID_SYS, NULL);
+   hdd_context_t *pHddCtx = NULL;
+   struct sk_buff *skb;
+
+   if(!pVosContext)
+   {
+      hddLog(VOS_TRACE_LEVEL_FATAL,"%s: Global VOS context is Null", __func__);
+      return false;
+   }
+
+   pHddCtx = (hdd_context_t *)vos_get_context(VOS_MODULE_ID_HDD, pVosContext );
+   if(!pHddCtx) {
+      VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_FATAL,
+               "%s: HDD context is Null", __func__);
+      return false;
+   }
+
+   if (unlikely(NULL == pPacket))
+   {
+      VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_FATAL,
+                "%s: NULL pointer", __func__);
+      return false;
+   }
+
+   if ( VOS_STATUS_SUCCESS !=
+        vos_pkt_get_os_packet(pPacket, (void**)&skb, VOS_FALSE ))
+   {
+      VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_FATAL,
+                "%s: OS PKT pointer is NULL", __func__);
+      return false;
+   }
+
+   if (pHddCtx->track_arp_ip ==
+       (v_U32_t)(*(v_U32_t *)(skb->data + VOS_ARP_TARGET_IP_OFFSET)))
+      return true;
+
+   return false;
+}
+
+/**
+ * vos_update_arp_fw_tx_delivered() - update the ARP stats host to FW deliver
+ *                                    count
+ *
+ * Return: None
+ */
+void vos_update_arp_fw_tx_delivered(void)
+{
+   v_CONTEXT_t pVosContext = vos_get_global_context(VOS_MODULE_ID_SYS, NULL);
+   hdd_context_t *pHddCtx = NULL;
+   hdd_adapter_t * pAdapter = NULL;
+   hdd_adapter_list_node_t *pAdapterNode = NULL, *pNext = NULL;
+   uint8_t status;
+
+   if(!pVosContext) {
+      hddLog(VOS_TRACE_LEVEL_FATAL,"%s: Global VOS context is Null", __func__);
+      return;
+   }
+
+   pHddCtx = (hdd_context_t *)vos_get_context(VOS_MODULE_ID_HDD, pVosContext );
+   if(!pHddCtx) {
+      VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_FATAL,
+               "%s: HDD context is Null", __func__);
+      return;
+   }
+
+   status = hdd_get_front_adapter(pHddCtx, &pAdapterNode);
+
+   while (NULL != pAdapterNode && 0 == status)
+   {
+      pAdapter = pAdapterNode->pAdapter;
+      if (pAdapter->device_mode == WLAN_HDD_INFRA_STATION)
+         break;
+
+      status = hdd_get_next_adapter (pHddCtx, pAdapterNode, &pNext);
+      pAdapterNode = pNext;
+   }
+   if (pAdapter)
+      pAdapter->hdd_stats.hddArpStats.tx_host_fw_sent++;
+}
+
+/**
+ * vos_update_arp_rx_drop_reorder() - update the RX ARP stats drop due
+ *                                    reorder logic at host
+ *
+ * Return: None
+ */
+void vos_update_arp_rx_drop_reorder(void)
+{
+   v_CONTEXT_t pVosContext = vos_get_global_context(VOS_MODULE_ID_SYS, NULL);
+   hdd_context_t *pHddCtx = NULL;
+   hdd_adapter_t * pAdapter = NULL;
+   hdd_adapter_list_node_t *pAdapterNode = NULL, *pNext = NULL;
+   uint8_t status;
+
+   if(!pVosContext) {
+      hddLog(VOS_TRACE_LEVEL_FATAL,"%s: Global VOS context is Null", __func__);
+      return;
+   }
+
+   pHddCtx = (hdd_context_t *)vos_get_context(VOS_MODULE_ID_HDD, pVosContext );
+   if(!pHddCtx) {
+      VOS_TRACE(VOS_MODULE_ID_VOSS, VOS_TRACE_LEVEL_FATAL,
+               "%s: HDD context is Null", __func__);
+      return;
+   }
+
+   status = hdd_get_front_adapter(pHddCtx, &pAdapterNode);
+
+   while (NULL != pAdapterNode && 0 == status)
+   {
+      pAdapter = pAdapterNode->pAdapter;
+      if (pAdapter->device_mode == WLAN_HDD_INFRA_STATION)
+         break;
+
+      status = hdd_get_next_adapter (pHddCtx, pAdapterNode, &pNext);
+      pAdapterNode = pNext;
+   }
+   if (pAdapter)
+      pAdapter->hdd_stats.hddArpStats.rx_host_drop_reorder++;
+}
+
+v_BOOL_t vos_check_monitor_state(void)
+{
+	hdd_context_t *hdd_ctx;
+
+	v_CONTEXT_t vos_ctx = vos_get_global_context(VOS_MODULE_ID_HDD, NULL);
+	if (!vos_ctx)
+		return VOS_FALSE;
+
+	hdd_ctx = vos_get_context(VOS_MODULE_ID_HDD, vos_ctx);
+	if (!hdd_ctx)
+		return VOS_FALSE;
+
+	return wlan_hdd_check_monitor_state(hdd_ctx);
+}
